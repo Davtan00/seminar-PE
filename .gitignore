@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+ExampleSeminar.py
+
 # C extensions
 *.so
 
@@ -25,6 +27,16 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Heroku
+*.log
+.heroku/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
