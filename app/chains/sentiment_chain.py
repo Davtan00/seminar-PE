@@ -1,13 +1,14 @@
-from langchain.chains import LLMChain
-from langchain_openai import ChatOpenAI  
-from app.prompts.sentiment_prompts import create_sentiment_prompt
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.runnables import RunnablePassthrough
+from langchain_openai import ChatOpenAI
+from app.prompts.sentiment_prompts import create_sentiment_prompt, create_bad_prompt
 from app.utils.cost_tracker import track_cost
 from app.config import get_settings
 from fastapi import HTTPException
 import json
 import uuid
 from typing import Dict, Any
-from openai import OpenAIError  
+from openai import OpenAIError
 
 class SentimentAnalysisChain:
     def __init__(self):
@@ -15,7 +16,7 @@ class SentimentAnalysisChain:
         try:
             self.llm = ChatOpenAI(
                 temperature=0,
-                model="gpt-3.5-turbo", # Using 3.5 for cost efficiency since this is my own api key
+                model="gpt-3.5-turbo", # Using 3.5 for cost efficiency since this is a personal key
                 request_timeout=30,
                 openai_api_key=settings.OPENAI_API_KEY
             )
@@ -23,24 +24,31 @@ class SentimentAnalysisChain:
             print(f"Error initializing ChatOpenAI: {e}")
             raise
         
-    async def analyze(self, text: str, domain: str) -> Dict[str, Any]:
+    async def analyze(self, text: str, domain: str, use_bad_prompt: bool = False, index: int = 0) -> Dict[str, Any]:
         try:
-            prompt = create_sentiment_prompt(domain)
-            chain = LLMChain(llm=self.llm, prompt=prompt)
+            prompt = create_bad_prompt() if use_bad_prompt else create_sentiment_prompt(domain)
+            chain = (
+                {"text": RunnablePassthrough(), "domain": lambda _: domain} 
+                | prompt 
+                | self.llm 
+                | JsonOutputParser()
+            )
             
-            with track_cost() as cost:
-                result = await chain.arun(text=text, domain=domain)
-                
-            analysis = json.loads(result)
+            result = await chain.ainvoke(text)
+            
             return {
-                "id": f"rev_{str(uuid.uuid4())[:8]}",
+                "id": index + 1,  # Simple enumeration
                 "text": text,
-                **analysis,
-                "cost_info": cost
+                **result
             }
-        except OpenAIError as e:  # Updated error handling
+        except OpenAIError as e:
             raise HTTPException(status_code=500, detail=f"OpenAI API Error: {str(e)}")
-        except json.JSONDecodeError:
-            raise ValueError("Failed to parse LLM response")
+        except json.JSONDecodeError as e:
+            return {
+                "id": index + 1,
+                "text": text,
+                "error": "Failed to get structured output",
+                "raw_response": str(e)
+            }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error during analysis: {str(e)}")

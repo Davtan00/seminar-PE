@@ -1,4 +1,4 @@
-from langchain_core.prompts import (
+from langchain.prompts import (
     ChatPromptTemplate,
     SystemMessagePromptTemplate,
     HumanMessagePromptTemplate
@@ -23,4 +23,29 @@ def create_sentiment_prompt(domain: str) -> ChatPromptTemplate:
     return ChatPromptTemplate.from_messages([
         system_message_prompt,
         human_message_prompt
+    ])
+
+# Add these after the existing prompts
+BASIC_SYSTEM_TEMPLATE = """You are a sentiment analysis model."""
+
+BASIC_HUMAN_TEMPLATE = """What is the sentiment of this text? Text: {text}
+Return the result in JSON format."""
+
+def create_basic_prompt(domain: str) -> ChatPromptTemplate:
+    system_message_prompt = SystemMessagePromptTemplate.from_template(BASIC_SYSTEM_TEMPLATE)
+    human_message_prompt = HumanMessagePromptTemplate.from_template(BASIC_HUMAN_TEMPLATE)
+    
+    return ChatPromptTemplate.from_messages([
+        system_message_prompt,
+        human_message_prompt
+    ])
+
+
+BAD_TEMPLATE = """Clean up this data and return it as JSON for sentiment analysis:
+{text}"""
+
+def create_bad_prompt() -> ChatPromptTemplate:
+    # No system message, just a basic human prompt - like most non-engineers would do
+    return ChatPromptTemplate.from_messages([
+        HumanMessagePromptTemplate.from_template(BAD_TEMPLATE)
     ])
