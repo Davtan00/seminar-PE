@@ -6,25 +6,31 @@ from app.config import get_settings
 import json
 import uuid
 from typing import Dict, Any
+import openai
+from http import HTTPException
 
 class SentimentAnalysisChain:
     def __init__(self):
         settings = get_settings()
-        self.llm = ChatOpenAI(
-            temperature=0,
-            model="gpt-3.5-turbo",  # Using 3.5 for cost efficiency since this is my own api key
-            request_timeout=30,
-            openai_api_key=settings.OPENAI_API_KEY
-        )
+        try:
+            self.llm = ChatOpenAI(
+                temperature=0,
+                model="gpt-3.5-turbo", # Using 3.5 for cost efficiency since this is my own api ke
+                request_timeout=30,
+                openai_api_key=settings.OPENAI_API_KEY
+            )
+        except Exception as e:
+            print(f"Error initializing ChatOpenAI: {e}")
+            raise
         
     async def analyze(self, text: str, domain: str) -> Dict[str, Any]:
-        prompt = create_sentiment_prompt(domain)
-        chain = LLMChain(llm=self.llm, prompt=prompt)
-        
-        with track_cost() as cost:
-            result = await chain.arun(text=text, domain=domain)
-            
         try:
+            prompt = create_sentiment_prompt(domain)
+            chain = LLMChain(llm=self.llm, prompt=prompt)
+            
+            with track_cost() as cost:
+                result = await chain.arun(text=text, domain=domain)
+                
             analysis = json.loads(result)
             return {
                 "id": f"rev_{str(uuid.uuid4())[:8]}",
@@ -32,5 +38,9 @@ class SentimentAnalysisChain:
                 **analysis,
                 "cost_info": cost
             }
+        except openai.error.APIError as e:
+            raise HTTPException(status_code=500, detail=f"OpenAI API Error: {str(e)}")
         except json.JSONDecodeError:
             raise ValueError("Failed to parse LLM response")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error during analysis: {str(e)}")
