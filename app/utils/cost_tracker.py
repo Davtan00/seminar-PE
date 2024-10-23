@@ -1,4 +1,4 @@
-from langchain.callbacks import get_openai_callback
+from langchain_community.callbacks import get_openai_callback
 from contextlib import contextmanager
 from typing import Generator, Dict, Any
 

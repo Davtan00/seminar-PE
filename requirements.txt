@@ -1,12 +1,18 @@
 # Core Framework
-fastapi>=0.68.1
-uvicorn==0.15.0
-gunicorn==20.1.0
-pydantic>=1.9.0,<3.0.0
+fastapi>=0.100.0
+uvicorn>=0.15.0
+gunicorn>=20.1.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+starlette>=0.27.0
 
 # OpenAI and LangChain
-openai==0.28.1
-langchain==0.0.184
+openai>=1.0.0
+langchain>=0.1.0
+langchain-openai>=0.0.2
+langchain-community>=0.0.1
+langchain-core>=0.1.0
 
 # Utilities
-python-dotenv==0.19.0
+python-dotenv>=0.19.0
+httpx>=0.24.0

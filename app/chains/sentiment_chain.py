@@ -1,13 +1,13 @@
 from langchain.chains import LLMChain
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI  
 from app.prompts.sentiment_prompts import create_sentiment_prompt
 from app.utils.cost_tracker import track_cost
 from app.config import get_settings
+from fastapi import HTTPException
 import json
 import uuid
 from typing import Dict, Any
-import openai
-from http import HTTPException
+from openai import OpenAIError  
 
 class SentimentAnalysisChain:
     def __init__(self):
@@ -15,7 +15,7 @@ class SentimentAnalysisChain:
         try:
             self.llm = ChatOpenAI(
                 temperature=0,
-                model="gpt-3.5-turbo", # Using 3.5 for cost efficiency since this is my own api ke
+                model="gpt-3.5-turbo", # Using 3.5 for cost efficiency since this is my own api key
                 request_timeout=30,
                 openai_api_key=settings.OPENAI_API_KEY
             )
@@ -38,7 +38,7 @@ class SentimentAnalysisChain:
                 **analysis,
                 "cost_info": cost
             }
-        except openai.error.APIError as e:
+        except OpenAIError as e:  # Updated error handling
             raise HTTPException(status_code=500, detail=f"OpenAI API Error: {str(e)}")
         except json.JSONDecodeError:
             raise ValueError("Failed to parse LLM response")
