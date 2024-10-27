@@ -20,7 +20,7 @@ class TextAnalysisChain:
         self.llm = ChatOpenAI(
             temperature=0.1,  
             model="gpt-4o-mini",  # Good price/performance model choice with 128k context window
-            request_timeout=900,  # Increased timeout
+            request_timeout=1000,  # Increased timeout
             max_retries=5,  # Increased max retries
             max_tokens=16384,  
             openai_api_key=settings.OPENAI_API_KEY

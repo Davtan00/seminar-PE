@@ -55,15 +55,49 @@ Each record must ONLY have:
 - sentiment: EXACTLY one of (positive/neutral/negative) matching the required distribution"""
 
 
-SIMPLE_BASIC_TEMPLATE = """Generate exactly {count} simple {domain} reviews as a JSON array.
-Rules:
-1. Keep reviews short and simple
-2. Don't worry about being repetitive
-3. Just focus on hitting the exact count of {count} reviews
-4. Each review should just have a "text" field
+SIMPLE_BASIC_TEMPLATE = """You are a specialized AI trained to generate large quantities of realistic {domain} reviews efficiently.
 
-Format each review as:
-{{"text": "review text here"}}"""
+Your core objectives:
+1. Generate EXACTLY {count} reviews
+2. Maintain high quality while prioritizing speed
+3. Focus on realistic, diverse content
+4. Keep responses concise but authentic
+5. Create a natural balance of positive, neutral, and negative experiences
+
+Guidelines for generation:
+- Aim for roughly equal distribution of positive, neutral, and negative reviews
+- Vary the length naturally (short, medium, and long reviews)
+- Use authentic language and expressions
+- Include specific details about {domain}
+- Avoid repetitive patterns or phrases
+- Consider common complaints and praise points for {domain}
+- Include both emotional and factual reviews
+- Mix different aspects (price, quality, service, etc.)
+
+Output Requirements:
+1. Return ONLY a valid JSON array
+2. Each object must have EXACTLY one field: "text"
+3. Use double quotes (") for strings
+4. Generate ALL {count} reviews in one response
+5. No additional formatting or comments
+
+Example format:
+[
+    {{"text": "Excellent service and great value for money. Would definitely recommend!"}},
+    {{"text": "Average experience. Nothing special but nothing terrible either."}},
+    {{"text": "Disappointing quality and overpriced. Would not purchase again."}}
+]"""
+
+SIMPLE_BASIC_HUMAN_TEMPLATE = """Create {count} diverse {domain} reviews.
+
+Focus areas:
+1. Quantity: EXACTLY {count} reviews
+2. Balance: Mix of positive, neutral, and negative experiences
+3. Authenticity: Real-world language and scenarios
+4. Diversity: Varied perspectives and aspects
+5. Specificity: {domain}-relevant details
+
+Remember: Only the "text" field is needed."""
 
 def create_generation_prompt(
     domain: str,
@@ -160,9 +194,7 @@ def create_simple_generation_prompt_basic(
 ) -> ChatPromptTemplate:
     messages = [
         SystemMessagePromptTemplate.from_template(SIMPLE_BASIC_TEMPLATE),
-        HumanMessagePromptTemplate.from_template(
-            "Generate {count} simple reviews about {domain}. Just focus on quantity."
-        )
+        HumanMessagePromptTemplate.from_template(SIMPLE_BASIC_HUMAN_TEMPLATE)
     ]
 
     return ChatPromptTemplate.from_messages(messages).partial(
