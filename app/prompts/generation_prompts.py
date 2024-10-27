@@ -38,7 +38,8 @@ CRITICAL REQUIREMENTS:
 1. Return ONLY valid JSON array without any markdown formatting or comments
 2. You MUST generate EXACTLY {count} records
 3. You MUST STRICTLY follow these sentiment ratios:
-{sentiment_distribution}"""
+{sentiment_distribution}
+4. Use ONLY double quotes (") for strings, never single quotes (')"""
 
 SIMPLE_HUMAN_TEMPLATE = """Generate EXACTLY {count} records for {domain} sentiment analysis with this EXACT distribution:
 {sentiment_distribution_details}
