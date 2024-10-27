@@ -3,13 +3,16 @@ from langchain_core.output_parsers import JsonOutputParser
 from pydantic import BaseModel, Field
 from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
-from app.prompts.generation_prompts import create_generation_prompt, create_bad_generation_prompt, create_simple_generation_prompt
+from app.prompts.generation_prompts import create_generation_prompt, create_bad_generation_prompt, create_simple_generation_prompt,create_simple_generation_prompt_basic
 from app.config import get_settings
 from fastapi import HTTPException
 from typing import Dict, Any, List, Optional
 from openai import OpenAIError
 import asyncio
 
+
+class SimpleRecord(BaseModel):
+    text: str = Field(description="The generated review/feedback text")
 
 MAX_RECORDS = 10000  
 #gpt-3.5-turbo-16k or gpt-4o-mini seems to produce similar results tbh.
@@ -21,17 +24,23 @@ class DataGenerationChain:
             model="gpt-4o-mini",  # Good price/performance model choice with 128k context window
             request_timeout=900,  # Increased timeout
             max_retries=5,  # Increased max retries
-            # Can set higher max_tokens due to 128k context window
             max_tokens=16384,  # Increased significantly, max allowed
-            presence_penalty=0.1,    # Reduce repetition
-            frequency_penalty=0.1,   # Encourage diversity
+            presence_penalty=0.0,    # Reduce repetition
+            frequency_penalty=0.0,   # Encourage diversity
             openai_api_key=settings.OPENAI_API_KEY
         )
    
-        # Create a more robust parser setup
+        # Create two parsers - one for sentiment records and one for simple records
         base_parser = JsonOutputParser(pydantic_object=List[SentimentRecord])
         self.parser = OutputFixingParser.from_llm(
             parser=base_parser,
+            llm=self.llm
+        )
+        
+        # Add a simple parser for the generate_simple endpoint
+        simple_base_parser = JsonOutputParser(pydantic_object=List[SimpleRecord])
+        self.simple_parser = OutputFixingParser.from_llm(
+            parser=simple_base_parser,
             llm=self.llm
         )
 
@@ -226,6 +235,94 @@ class DataGenerationChain:
                     )
        
         return warnings
+
+    async def generate_simple(
+        self,
+        domain: str,
+        count: int,
+    ) -> Dict[str, Any]:
+        try:
+            results = []
+            warnings = []
+            current_id = 1
+            batch_size = 100
+            
+            remaining_count = count
+            while remaining_count > 0:
+                current_batch_size = min(batch_size, remaining_count)
+                
+                batch_result = await self._generate_simple_batch(
+                    domain, 
+                    current_batch_size,
+                    start_id=current_id
+                )
+                
+                if "data" in batch_result:
+                    results.extend(batch_result["data"])
+                    current_id += len(batch_result["data"])
+                    remaining_count -= len(batch_result["data"])
+                
+                if "warnings" in batch_result:
+                    warnings.extend(batch_result["warnings"])
+                
+                if not batch_result.get("data"):
+                    break
+
+            return {
+                "data": results,
+                "warnings": warnings
+            }
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Error generating simple data: {str(e)}"
+            )
+
+    async def _generate_simple_batch(
+        self,
+        domain: str,
+        batch_count: int,
+        start_id: int
+    ) -> Dict[str, Any]:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                prompt = create_simple_generation_prompt_basic(
+                    domain=domain,
+                    count=batch_count
+                )
+                
+                chain = (
+                    {
+                        "domain": RunnablePassthrough(),
+                        "count": lambda x: batch_count,
+                    }
+                    | prompt
+                    | self.llm
+                    | self.simple_parser
+                )
+                
+                batch_results = await chain.ainvoke(domain)
+                
+                if not batch_results:
+                    if attempt < max_retries - 1:
+                        continue
+                    return {
+                        "data": [],
+                        "warnings": [f"Failed to generate any results after {max_retries} attempts"]
+                    }
+                
+                return {
+                    "data": [{"id": start_id + i, **item} for i, item in enumerate(batch_results)],
+                    "warnings": []
+                }
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                raise
 
 # Define Pydantic model for structured output
 class SentimentRecord(BaseModel):

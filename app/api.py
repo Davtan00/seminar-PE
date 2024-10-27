@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from app.chains.sentiment_chain import SentimentAnalysisChain
 from app.config import get_settings
@@ -141,7 +141,7 @@ class GenerationRequest(BaseModel):
     count: int = 10
     sentiment_distribution: Optional[Dict[str, float]] = None  # e.g., {"positive": 0.4, "neutral": 0.2, "negative": 0.4}
     output_format: str = "json"  # Could add support for CSV or other formats later
-    verbose: bool = True  # New field
+    verbose: bool = True 
 
 
 @app.post("/generate-data")
@@ -201,6 +201,36 @@ async def generate_data_basic(
             ],
             "summary": {
                 "total_generated": len(results),
+                "domain": request.domain,
+                "total_cost_usd": round(total_cost, 4)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add this new request model
+class SimpleGenerationRequest(BaseModel):
+    domain: str
+    count: int = Field(gt=0, le=MAX_RECORDS)
+
+@app.post("/generate-simple")
+async def generate_simple_data(
+    request: SimpleGenerationRequest,
+    _: str = Depends(verify_api_key)
+):
+    chain = DataGenerationChain()
+    total_cost = 0.0
+
+    try:
+        with track_cost() as cost:
+            results = await chain.generate_simple(request.domain, request.count)
+            total_cost = cost.get_costs()["total_cost"]
+
+        return {
+            "generated_data": results["data"],
+            "summary": {
+                "total_generated": len(results["data"]),
+                "requested_count": request.count,
                 "domain": request.domain,
                 "total_cost_usd": round(total_cost, 4)
             }

@@ -54,6 +54,17 @@ Each record must ONLY have:
 - text: a realistic and varied feedback text
 - sentiment: EXACTLY one of (positive/neutral/negative) matching the required distribution"""
 
+
+SIMPLE_BASIC_TEMPLATE = """Generate exactly {count} simple {domain} reviews as a JSON array.
+Rules:
+1. Keep reviews short and simple
+2. Don't worry about being repetitive
+3. Just focus on hitting the exact count of {count} reviews
+4. Each review should just have a "text" field
+
+Format each review as:
+{{"text": "review text here"}}"""
+
 def create_generation_prompt(
     domain: str,
     count: int,
@@ -141,4 +152,20 @@ def create_simple_generation_prompt(
         sentiment_distribution=dist_str,
         sentiment_distribution_details=dist_details,
         distribution_examples=examples
+    )
+
+def create_simple_generation_prompt_basic(
+    domain: str,
+    count: int,
+) -> ChatPromptTemplate:
+    messages = [
+        SystemMessagePromptTemplate.from_template(SIMPLE_BASIC_TEMPLATE),
+        HumanMessagePromptTemplate.from_template(
+            "Generate {count} simple reviews about {domain}. Just focus on quantity."
+        )
+    ]
+
+    return ChatPromptTemplate.from_messages(messages).partial(
+        domain=domain,
+        count=count
     )
