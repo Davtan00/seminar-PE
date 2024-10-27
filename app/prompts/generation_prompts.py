@@ -35,11 +35,14 @@ BAD_TEMPLATE = """Give me {count} rows of {domain} reviews for sentiment analysi
 SIMPLE_SYSTEM_TEMPLATE = """You are an expert in generating realistic {domain} feedback data.
 Your task is to create diverse, balanced, and authentic-looking sentiment data.
 CRITICAL REQUIREMENTS:
-1. Return ONLY valid JSON array without any markdown formatting or comments
-2. You MUST generate EXACTLY {count} records
-3. You MUST STRICTLY follow these sentiment ratios:
+1. Return ONLY valid JSON array with EXACTLY {count} records
+2. Each record MUST be complete and valid JSON
+3. Use ONLY double quotes (") for strings, never single quotes (')
+4. You MUST continue generating until you reach EXACTLY {count} records
+5. You MUST STRICTLY follow these sentiment ratios:
 {sentiment_distribution}
-4. Use ONLY double quotes (") for strings, never single quotes (')"""
+
+IMPORTANT: If you haven't generated {count} records, continue generating more until you reach the exact count."""
 
 SIMPLE_HUMAN_TEMPLATE = """Generate EXACTLY {count} records for {domain} sentiment analysis with this EXACT distribution:
 {sentiment_distribution_details}

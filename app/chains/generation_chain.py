@@ -40,39 +40,59 @@ class DataGenerationChain:
         domain: str,
         count: int,
         sentiment_distribution: Optional[Dict[str, float]] = None,
-        use_bad_prompt: bool = False,
-        verbose: bool = True
+        use_bad_prompt: bool = False, # Add this parameter if you want bad data
+        verbose: bool = True # Add this param as false to maximise output content
     ) -> Dict[str, Any]:
         count = min(count, MAX_RECORDS)
-        batch_size = 400 if not verbose else 200  # Larger batches with 128k context
+        batch_size = 50 if not verbose else 25
 
         try:
             results = []
             warnings = []
-            tasks = []
-
-            # Process batches concurrently
+            current_id = 1  # Track the current ID
+            
+            # Process batches sequentially
             for i in range(0, count, batch_size):
                 batch_count = min(batch_size, count - i)
-                tasks.append(self._generate_batch(
+                remaining_count = count - len(results)
+                
+                if remaining_count <= 0:
+                    break
+                    
+                batch_result = await self._generate_batch(
                     domain, 
-                    batch_count, 
+                    batch_count,
                     sentiment_distribution, 
-                    use_bad_prompt,  # Add this parameter
-                    verbose
-                ))
-            
-            batch_results = await asyncio.gather(*tasks)
-            
-            # Process results
-            for batch in batch_results:
-                if "data" in batch:
-                    results.extend(batch["data"])
-                if "warnings" in batch:
-                    warnings.extend(batch["warnings"])
+                    use_bad_prompt,
+                    verbose,
+                    start_id=current_id  # Pass the current ID
+                )
+                
+                if "data" in batch_result:
+                    results.extend(batch_result["data"])
+                    current_id += len(batch_result["data"])  # Update the ID counter
+                if "warnings" in batch_result:
+                    warnings.extend(batch_result["warnings"])
+                    
+                # Handle retries with correct ID continuation
+                if len(batch_result.get("data", [])) < batch_count:
+                    retry_count = batch_count - len(batch_result.get("data", []))
+                    retry_result = await self._generate_batch(
+                        domain,
+                        retry_count,
+                        sentiment_distribution,
+                        use_bad_prompt,
+                        verbose,
+                        start_id=current_id  # Pass the current ID for retry
+                    )
+                    if "data" in retry_result:
+                        results.extend(retry_result["data"])
+                        current_id += len(retry_result["data"])  # Update ID counter
+                    if "warnings" in retry_result:
+                        warnings.extend(retry_result["warnings"])
 
             return {
-                "data": [{"id": i + 1, **item} for i, item in enumerate(results)],
+                "data": results,  # No need to modify IDs here anymore
                 "warnings": warnings
             }
 
@@ -90,103 +110,78 @@ class DataGenerationChain:
     async def _generate_batch(
         self,
         domain: str,
-        batch_count: int, 
+        batch_count: int,
         sentiment_distribution: Optional[Dict[str, float]],
-        use_bad_prompt: bool,  # Add this parameter
-        verbose: bool
+        use_bad_prompt: bool,
+        verbose: bool,
+        start_id: int  # Add start_id parameter
     ) -> Dict[str, Any]:
         retries = 3
         while retries > 0:
             try:
-                return await self._process_batch(
-                    domain, 
-                    batch_count, 
+                batch_result = await self._process_batch(
+                    domain,
+                    batch_count,
                     sentiment_distribution,
-                    use_bad_prompt,  # Add this parameter 
-                    verbose
+                    use_bad_prompt,
+                    verbose,
+                    start_id  # Pass start_id to _process_batch
                 )
+                return batch_result
             except OpenAIError as e:
                 retries -= 1
                 if retries == 0:
                     raise
-                await asyncio.sleep(2 ** (3 - retries))  # Exponential backoff
+                await asyncio.sleep(2 ** (3 - retries))
 
     async def _process_batch(
         self,
         domain: str,
         batch_count: int,
         sentiment_distribution: Optional[Dict[str, float]],
-        use_bad_prompt: bool,  # Add this parameter
-        verbose: bool
+        use_bad_prompt: bool,
+        verbose: bool,
+        start_id: int  # Add start_id parameter
     ) -> Dict[str, Any]:
-        if use_bad_prompt:
-            prompt = create_bad_generation_prompt()
-        else:
-            prompt = (create_generation_prompt if verbose else create_simple_generation_prompt)(
-                domain=domain,
-                count=batch_count,
-                sentiment_distribution=sentiment_distribution
-            )
-       
-        # Print the formatted prompt
-        formatted_messages = prompt.format_messages(
-            domain=domain,
-            count=batch_count,
-            sentiment_distribution=sentiment_distribution
-        )
-        # Print the formatted prompt for playground
-        print("\n=== FORMATTED PROMPT ===")
-        for message in formatted_messages:
-            print(f"\n--- {message.type.upper()} MESSAGE ---")
-            print(message.content)
-        print("\n==================\n")
-       
-        chain = (
-            {
-                "domain": RunnablePassthrough(),
-                "count": lambda x: batch_count,
-                "sentiment_distribution": lambda x: sentiment_distribution
-            }
-            | prompt
-            | self.llm
-            | self.parser
-        )
-        
-        try:
-            batch_results = await chain.ainvoke(domain)
-            return {
-                "data": [{"id": i + 1, **item} for i, item in enumerate(batch_results)],
-                "warnings": self._validate_results(batch_results, batch_count, sentiment_distribution)
-            }
-        except Exception as e:
-            # Add more specific error handling
-            if "Invalid json output" in str(e):
-                # Try to clean and parse the output
-                try:
-                    # Get the raw output before parsing
-                    raw_output = str(e).split("Invalid json output: ")[1]
-                    # Clean up common JSON formatting issues
-                    cleaned_output = raw_output.replace("'", '"').replace(
-                        'sentiment:', '"sentiment":').replace(
-                        '\n', '').replace('    ', '')
-                    import json
-                    batch_results = [
-                        SentimentRecord(**item) 
-                        for item in json.loads(cleaned_output)
-                    ]
-                    return {
-                        "data": [{"id": i + 1, **item.dict()} 
-                                for i, item in enumerate(batch_results)],
-                        "warnings": self._validate_results(
-                            batch_results, batch_count, sentiment_distribution
-                        )
-                    }
-                except Exception as parse_error:
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to parse output: {str(parse_error)}"
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if use_bad_prompt:
+                    prompt = create_bad_generation_prompt()
+                else:
+                    prompt = (create_generation_prompt if verbose else create_simple_generation_prompt)(
+                        domain=domain,
+                        count=batch_count,
+                        sentiment_distribution=sentiment_distribution
                     )
-            raise
+                
+                chain = (
+                    {
+                        "domain": RunnablePassthrough(),
+                        "count": lambda x: batch_count,
+                        "sentiment_distribution": lambda x: sentiment_distribution
+                    }
+                    | prompt
+                    | self.llm
+                    | self.parser
+                )
+                
+                batch_results = await chain.ainvoke(domain)
+                
+                if len(batch_results) != batch_count:
+                    if attempt < max_retries - 1:
+                        continue
+                
+                return {
+                    "data": [{"id": start_id + i, **item} for i, item in enumerate(batch_results)],
+                    "warnings": self._validate_results(batch_results, batch_count, sentiment_distribution)
+                }
+                
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1)
+                    continue
+                raise
 
     def _validate_results(
         self,
