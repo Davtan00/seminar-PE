@@ -141,6 +141,7 @@ class GenerationRequest(BaseModel):
     count: int = 10
     sentiment_distribution: Optional[Dict[str, float]] = None  # e.g., {"positive": 0.4, "neutral": 0.2, "negative": 0.4}
     output_format: str = "json"  # Could add support for CSV or other formats later
+    verbose: bool = True  # New field
 
 
 @app.post("/generate-data")
@@ -148,9 +149,7 @@ async def generate_data(
         request: GenerationRequest,
         _: str = Depends(verify_api_key)
 ):
-    # Ensure count doesn't exceed limit
     count = min(request.count, MAX_RECORDS)
-    
     chain = DataGenerationChain()
     total_cost = 0.0
 
@@ -159,7 +158,8 @@ async def generate_data(
             result = await chain.generate(
                 domain=request.domain,
                 count=count,
-                sentiment_distribution=request.sentiment_distribution
+                sentiment_distribution=request.sentiment_distribution,
+                verbose=request.verbose  # Pass the verbose parameter
             )
             total_cost = cost.get_costs()["total_cost"]
 
