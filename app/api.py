@@ -1,11 +1,11 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from app.chains.sentiment_chain import SentimentAnalysisChain
 from app.config import get_settings
 from app.utils.cost_tracker import track_cost
 from app.chains.generation_chain import DataGenerationChain, MAX_RECORDS
-
+from app.chains.text_analysis_chain import TextAnalysisChain
 app = FastAPI(title="Sentiment Data Handling & Analysis")
 
 
@@ -237,3 +237,42 @@ async def generate_simple_data(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+class TextAnalysisRequest(BaseModel):
+    generated_data: List[Dict[str, Any]]
+    summary: Optional[Dict[str, Any]]
+
+@app.post("/analyze-text-batch")
+async def analyze_text_batch(
+    request: TextAnalysisRequest,
+    _: str = Depends(verify_api_key)
+):
+    chain = TextAnalysisChain()
+    results = []
+    total_cost = 0.0
+    
+    for item in request.generated_data:
+        try:
+            with track_cost() as cost:
+                result = await chain.analyze_text(item["text"], index=item["id"]-1)
+                total_cost += cost.get_costs()["total_cost"]
+            results.append(result)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    sentiment_counts = {
+        "positive": sum(1 for x in results if x["sentiment"] == "positive"),
+        "neutral": sum(1 for x in results if x["sentiment"] == "neutral"),
+        "negative": sum(1 for x in results if x["sentiment"] == "negative")
+    }
+    
+    return {
+        "analyzed_data": results,
+        "summary": {
+            "total_analyzed": len(results),
+            "sentiment_distribution": sentiment_counts,
+            "total_cost_usd": round(total_cost, 4)
+        }
+    }
