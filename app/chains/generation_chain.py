@@ -1,11 +1,12 @@
 from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_openai import ChatOpenAI
-from app.prompts.generation_prompts import create_generation_prompt, create_bad_generation_prompt
+from app.prompts.generation_prompts import create_generation_prompt, create_bad_generation_prompt, create_simple_generation_prompt
 from app.config import get_settings
 from fastapi import HTTPException
 from typing import Dict, Any, List, Optional
 from openai import OpenAIError
+
 
 MAX_RECORDS = 1000  # Safety limit since still not project API key
 #gpt-3.5-turbo-16k or gpt-4o-mini seems to produce similar results tbh.
@@ -13,66 +14,80 @@ class DataGenerationChain:
     def __init__(self):
         settings = get_settings()
         self.llm = ChatOpenAI(
-            temperature=0.5,   # Higher temperature for more variety, to make the results a bit more interesting
+            temperature=0.7,   # Increased temperature for more variety
             model="gpt-4o-mini",
-            request_timeout=300,
-            max_retries=1,
+            request_timeout=600,  # Increased timeout
+            max_retries=3,  # Increased max retries
             openai_api_key=settings.OPENAI_API_KEY
         )
-    
+   
     async def generate(
         self,
         domain: str,
         count: int,
         sentiment_distribution: Optional[Dict[str, float]] = None,
-        use_bad_prompt: bool = False
-    ) -> Dict[str, Any]:  # Changed return type to include status
-        count = min(count, MAX_RECORDS)  # Ensure count doesn't exceed limit
-        
+        use_bad_prompt: bool = False,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        count = min(count, MAX_RECORDS)
+        batch_size = 50  # New variable for batch processing
+       
         try:
-            prompt = create_bad_generation_prompt() if use_bad_prompt else create_generation_prompt(
-                domain=domain,
-                count=count,
-                sentiment_distribution=sentiment_distribution
-            )
-            
-            # Print the formatted prompt
-            formatted_messages = prompt.format_messages(
-                domain=domain,
-                count=count,
-                sentiment_distribution=sentiment_distribution
-            )
-            
-            print("\n=== FORMATTED PROMPT ===")
-            for message in formatted_messages:
-                print(f"\n--- {message.type.upper()} MESSAGE ---")
-                print(message.content)
-            print("\n==================\n")
-            
-            chain = (
-                {
-                    "domain": RunnablePassthrough(),
-                    "count": lambda x: count,
-                    "sentiment_distribution": lambda x: sentiment_distribution
-                }
-                | prompt
-                | self.llm
-                | JsonOutputParser(pydantic_object=None)  # More permissive parsing
-            )
-            
-            results = await chain.ainvoke(domain)
-            
-            # Get validation warnings instead of raising errors
-            validation_warnings = self._validate_results(results, count, sentiment_distribution)
-            
+            results = []
+            warnings = []
+           
+            for i in range(0, count, batch_size):
+                batch_count = min(batch_size, count - i)
+                
+                if use_bad_prompt:
+                    prompt = create_bad_generation_prompt()
+                else:
+                    prompt = (create_generation_prompt if verbose else create_simple_generation_prompt)(
+                        domain=domain,
+                        count=batch_count,
+                        sentiment_distribution=sentiment_distribution
+                    )
+               
+                # Print the formatted prompt
+                formatted_messages = prompt.format_messages(
+                    domain=domain,
+                    count=batch_count,
+                    sentiment_distribution=sentiment_distribution
+                )
+                # Print the formatted prompt for playground
+                print("\n=== FORMATTED PROMPT ===")
+                for message in formatted_messages:
+                    print(f"\n--- {message.type.upper()} MESSAGE ---")
+                    print(message.content)
+                print("\n==================\n")
+               
+                chain = (
+                    {
+                        "domain": RunnablePassthrough(),
+                        "count": lambda x: batch_count,
+                        "sentiment_distribution": lambda x: sentiment_distribution
+                    }
+                    | prompt
+                    | self.llm
+                    | JsonOutputParser(pydantic_object=None)  # More permissive parsing
+                )
+               
+                batch_results = await chain.ainvoke(domain)
+                results.extend(batch_results)
+               
+                # Validate batch results
+                batch_warnings = self._validate_results(batch_results, batch_count, sentiment_distribution)
+                warnings.extend(batch_warnings)
+           
             return {
                 "data": [{"id": i + 1, **item} for i, item in enumerate(results)],
-                "warnings": validation_warnings
+                "warnings": warnings
             }
         except OpenAIError as e:
             raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error generating data: {str(e)}")
+
 
     def _validate_results(
         self,
@@ -81,11 +96,11 @@ class DataGenerationChain:
         sentiment_distribution: Optional[Dict[str, float]] = None
     ) -> List[str]:
         warnings = []
-        
+       
         # Validate count
         if len(results) != count:
             warnings.append(f"Incomplete results: Expected {count} records, got {len(results)}")
-        
+       
         # Validate sentiment distribution if specified
         if sentiment_distribution:
             actual_distribution = {
@@ -93,7 +108,7 @@ class DataGenerationChain:
                 "neutral": sum(1 for x in results if x["sentiment"] == "neutral") / len(results),
                 "negative": sum(1 for x in results if x["sentiment"] == "negative") / len(results)
             }
-            
+           
             # Allow for a 5% margin of error in distribution
             margin = 0.05
             for sentiment, expected_ratio in sentiment_distribution.items():
@@ -103,5 +118,5 @@ class DataGenerationChain:
                         f"Sentiment distribution mismatch for {sentiment}: "
                         f"expected {expected_ratio:.1%}, got {actual_ratio:.1%}"
                     )
-        
+       
         return warnings
