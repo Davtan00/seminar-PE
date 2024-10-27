@@ -38,11 +38,11 @@ CRITICAL REQUIREMENTS:
 1. Return ONLY valid JSON array with EXACTLY {count} records
 2. Each record MUST be complete and valid JSON
 3. Use ONLY double quotes (") for strings, never single quotes (')
-4. You MUST continue generating until you reach EXACTLY {count} records
+4. Generate ALL {count} records in a single response
 5. You MUST STRICTLY follow these sentiment ratios:
 {sentiment_distribution}
 
-IMPORTANT: If you haven't generated {count} records, continue generating more until you reach the exact count."""
+IMPORTANT: Your response MUST contain EXACTLY {count} records, no more, no less."""
 
 SIMPLE_HUMAN_TEMPLATE = """Generate EXACTLY {count} records for {domain} sentiment analysis with this EXACT distribution:
 {sentiment_distribution_details}

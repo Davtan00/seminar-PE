@@ -22,7 +22,7 @@ class DataGenerationChain:
             request_timeout=900,  # Increased timeout
             max_retries=5,  # Increased max retries
             # Can set higher max_tokens due to 128k context window
-            max_tokens=8000,  
+            max_tokens=16384,  # Increased significantly, max allowed
             presence_penalty=0.1,    # Reduce repetition
             frequency_penalty=0.1,   # Encourage diversity
             openai_api_key=settings.OPENAI_API_KEY
@@ -44,55 +44,42 @@ class DataGenerationChain:
         verbose: bool = True # Add this param as false to maximise output content
     ) -> Dict[str, Any]:
         count = min(count, MAX_RECORDS)
-        batch_size = 50 if not verbose else 25
+        # Increase batch size significantly
+        batch_size = 100 if not verbose else 50  # Handle more records per batch
 
         try:
             results = []
             warnings = []
             current_id = 1  # Track the current ID
             
-            # Process batches sequentially
-            for i in range(0, count, batch_size):
-                batch_count = min(batch_size, count - i)
-                remaining_count = count - len(results)
+            # Use fewer, larger batches
+            remaining_count = count
+            while remaining_count > 0:
+                current_batch_size = min(batch_size, remaining_count)
                 
-                if remaining_count <= 0:
-                    break
-                    
                 batch_result = await self._generate_batch(
                     domain, 
-                    batch_count,
+                    current_batch_size,
                     sentiment_distribution, 
                     use_bad_prompt,
                     verbose,
-                    start_id=current_id  # Pass the current ID
+                    start_id=current_id
                 )
                 
                 if "data" in batch_result:
                     results.extend(batch_result["data"])
-                    current_id += len(batch_result["data"])  # Update the ID counter
+                    current_id += len(batch_result["data"])
+                    remaining_count -= len(batch_result["data"])
+                
                 if "warnings" in batch_result:
                     warnings.extend(batch_result["warnings"])
-                    
-                # Handle retries with correct ID continuation
-                if len(batch_result.get("data", [])) < batch_count:
-                    retry_count = batch_count - len(batch_result.get("data", []))
-                    retry_result = await self._generate_batch(
-                        domain,
-                        retry_count,
-                        sentiment_distribution,
-                        use_bad_prompt,
-                        verbose,
-                        start_id=current_id  # Pass the current ID for retry
-                    )
-                    if "data" in retry_result:
-                        results.extend(retry_result["data"])
-                        current_id += len(retry_result["data"])  # Update ID counter
-                    if "warnings" in retry_result:
-                        warnings.extend(retry_result["warnings"])
+                
+                # Break if we're not making progress
+                if not batch_result.get("data"):
+                    break
 
             return {
-                "data": results,  # No need to modify IDs here anymore
+                "data": results,
                 "warnings": warnings
             }
 
@@ -155,6 +142,13 @@ class DataGenerationChain:
                         sentiment_distribution=sentiment_distribution
                     )
                 
+                # Add explicit instructions about batch size
+                messages = prompt.format_messages(
+                    domain=domain,
+                    count=batch_count,
+                    sentiment_distribution=sentiment_distribution
+                )
+                
                 chain = (
                     {
                         "domain": RunnablePassthrough(),
@@ -168,6 +162,16 @@ class DataGenerationChain:
                 
                 batch_results = await chain.ainvoke(domain)
                 
+                # Guard against empty results
+                if not batch_results:
+                    if attempt < max_retries - 1:
+                        continue
+                    return {
+                        "data": [],
+                        "warnings": [f"Failed to generate any results after {max_retries} attempts"]
+                    }
+                
+                # Validate batch size
                 if len(batch_results) != batch_count:
                     if attempt < max_retries - 1:
                         continue
@@ -181,7 +185,10 @@ class DataGenerationChain:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(1)
                     continue
-                raise
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Error processing batch: {str(e)}"
+                )
 
     def _validate_results(
         self,
@@ -191,12 +198,17 @@ class DataGenerationChain:
     ) -> List[str]:
         warnings = []
        
+        # Guard against empty results
+        if not results:
+            warnings.append(f"No results generated: Expected {count} records, got 0")
+            return warnings
+       
         # Validate count
         if len(results) != count:
             warnings.append(f"Incomplete results: Expected {count} records, got {len(results)}")
        
         # Validate sentiment distribution if specified
-        if sentiment_distribution:
+        if sentiment_distribution and results:  # Only check if we have results
             actual_distribution = {
                 "positive": sum(1 for x in results if x["sentiment"] == "positive") / len(results),
                 "neutral": sum(1 for x in results if x["sentiment"] == "neutral") / len(results),
