@@ -2,10 +2,12 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from app.chains.sentiment_chain import SentimentAnalysisChain
-from app.config import get_settings
+from app.config import get_settings, get_security_manager
 from app.utils.cost_tracker import track_cost
 from app.chains.generation_chain import DataGenerationChain, MAX_RECORDS
 from app.chains.text_analysis_chain import TextAnalysisChain
+from datetime import datetime, timedelta
+from langchain.chat_models import ChatOpenAI
 app = FastAPI(title="Sentiment Data Handling & Analysis")
 
 
@@ -276,3 +278,94 @@ async def analyze_text_batch(
             "total_cost_usd": round(total_cost, 4)
         }
     }
+
+class GenerationConfig(BaseModel):
+    sentimentDistribution: Dict[str, int]
+    rowCount: int
+    domain: str
+    temperature: float
+    topP: float
+    maxTokens: int
+    frequencyPenalty: float
+    presencePenalty: float
+    model: str
+    privacyLevel: float
+    biasControl: float
+    sentimentIntensity: float
+    realism: float
+    domainRelevance: float
+    diversity: float
+    temporalRelevance: float
+    noiseLevel: float
+    culturalSensitivity: float
+    formality: float
+    lexicalComplexity: float
+
+class SecureGenerationRequest(BaseModel):
+    encryptedKey: str
+    config: GenerationConfig
+    timestamp: int
+    signature: str
+
+@app.post("/secure-generate")
+async def secure_generate(request: SecureGenerationRequest):
+    security_manager = get_security_manager()
+    
+    # Verify request is not too old (15 minute window)
+    current_time = int(datetime.now().timestamp() * 1000)
+    if current_time - request.timestamp > 900000:  
+        raise HTTPException(status_code=401, detail="Request expired")
+
+    # Verify signature
+    if not security_manager.verify_signature(
+        request.timestamp,
+        request.config.dict(),
+        request.signature
+    ):
+        raise HTTPException(status_code=401, detail="Invalid request signature")
+
+    try:
+        # Decrypt the API key
+        api_key = security_manager.decrypt_api_key(request.encryptedKey)
+        
+        # Initialize chain with decrypted key and config
+        chain = DataGenerationChain()
+        chain.llm = ChatOpenAI(
+            temperature=request.config.temperature,
+            model=request.config.model,
+            top_p=request.config.topP,
+            max_tokens=request.config.maxTokens,
+            presence_penalty=request.config.presencePenalty,
+            frequency_penalty=request.config.frequencyPenalty,
+            openai_api_key=api_key
+        )
+
+        # Convert sentiment distribution to proper format
+        sentiment_distribution = {
+            "positive": request.config.sentimentDistribution["positive"] / 100,
+            "neutral": request.config.sentimentDistribution["neutral"] / 100,
+            "negative": request.config.sentimentDistribution["negative"] / 100
+        }
+
+        # Generate data
+        result = await chain.generate(
+            domain=request.config.domain,
+            count=request.config.rowCount,
+            sentiment_distribution=sentiment_distribution
+        )
+
+        return {
+            "generated_data": [
+                {
+                    "id": item["id"],
+                    "text": item["text"],
+                    "sentiment": item["sentiment"]
+                }
+                for item in result["data"]
+            ]
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
