@@ -27,6 +27,8 @@ class SecurityManager:
 
     def verify_signature(self, timestamp: int, payload: Dict[str, Any], signature: str) -> bool:
         string_to_sign = f"{timestamp}.{json.dumps(payload)}"
+        print(f"Backend string to sign: {string_to_sign}")  # For debugging
+        
         expected_signature = base64.b64encode(
             HMAC(
                 key=self.signing_secret.encode(),
@@ -34,6 +36,10 @@ class SecurityManager:
                 digestmod=hashlib.sha256
             ).digest()
         ).decode()
+        
+        print(f"Expected signature: {expected_signature}")  # For debugging
+        print(f"Received signature: {signature}")  # For debugging
+        
         return compare_digest(signature, expected_signature)
 
 class Settings(BaseSettings):

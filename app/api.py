@@ -8,6 +8,18 @@ from app.chains.generation_chain import DataGenerationChain, MAX_RECORDS
 from app.chains.text_analysis_chain import TextAnalysisChain
 from datetime import datetime, timedelta
 from langchain.chat_models import ChatOpenAI
+from app.chains.optimized_chain import OptimizedGenerationChain
+from datetime import datetime
+import hmac
+import hashlib
+import base64
+import json
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import unpad
+import os
+from fastapi.middleware.cors import CORSMiddleware
+import binascii
+
 app = FastAPI(title="Sentiment Data Handling & Analysis")
 
 
@@ -279,6 +291,15 @@ async def analyze_text_batch(
         }
     }
 
+async def verify_api_key(x_api_key: str = Header(...)):
+    if x_api_key != get_settings().API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    return x_api_key
+
+
 class GenerationConfig(BaseModel):
     sentimentDistribution: Dict[str, int]
     rowCount: int
@@ -305,65 +326,74 @@ class SecureGenerationRequest(BaseModel):
     encryptedKey: str
     config: GenerationConfig
     timestamp: int
-    signature: str
+
+ENCRYPTION_KEY_HEX = "1d443b0800609907c95819d255084b2341c955020ccb6a04"  # Example: 32 hexadecimal chars for a 16-byte key (128 bits)
+ENCRYPTION_KEY = binascii.unhexlify(ENCRYPTION_KEY_HEX)
+
+def decrypt_api_key(encrypted_key: str, encryption_key: bytes) -> str:
+    try:
+        # Decode the encrypted key from Base64
+        encrypted_data = base64.b64decode(encrypted_key)
+
+        # Extract the IV (first 16 bytes) and the ciphertext
+        iv = encrypted_data[:16]
+        ciphertext = encrypted_data[16:]
+
+        # Initialize AES cipher in CBC mode with the provided IV
+        cipher = AES.new(encryption_key, AES.MODE_CBC, iv)
+
+        # Decrypt and unpad the ciphertext
+        decrypted_bytes = unpad(cipher.decrypt(ciphertext), AES.block_size)
+        return decrypted_bytes.decode('utf-8')
+    except (ValueError, KeyError) as e:
+        # Handle padding errors or incorrect key errors
+        raise HTTPException(status_code=400, detail="Decryption failed: Incorrect key or padding.")
+
 
 @app.post("/secure-generate")
-async def secure_generate(request: SecureGenerationRequest):
-    security_manager = get_security_manager()
-    
-    # Verify request is not too old (15 minute window)
+async def secure_generate(
+    request: SecureGenerationRequest,
+    x_api_key: str = Header(...)
+):
     current_time = int(datetime.now().timestamp() * 1000)
-    if current_time - request.timestamp > 900000:  
+    if current_time - request.timestamp > 900000:  # 15 minutes validity
         raise HTTPException(status_code=401, detail="Request expired")
 
-    # Verify signature
-    if not security_manager.verify_signature(
-        request.timestamp,
-        request.config.dict(),
-        request.signature
-    ):
-        raise HTTPException(status_code=401, detail="Invalid request signature")
-
     try:
-        # Decrypt the API key
-        api_key = security_manager.decrypt_api_key(request.encryptedKey)
-        
-        # Initialize chain with decrypted key and config
-        chain = DataGenerationChain()
-        chain.llm = ChatOpenAI(
-            temperature=request.config.temperature,
-            model=request.config.model,
-            top_p=request.config.topP,
-            max_tokens=request.config.maxTokens,
-            presence_penalty=request.config.presencePenalty,
-            frequency_penalty=request.config.frequencyPenalty,
-            openai_api_key=api_key
-        )
-
-        # Convert sentiment distribution to proper format
-        sentiment_distribution = {
-            "positive": request.config.sentimentDistribution["positive"] / 100,
-            "neutral": request.config.sentimentDistribution["neutral"] / 100,
-            "negative": request.config.sentimentDistribution["negative"] / 100
-        }
-
-        # Generate data
-        result = await chain.generate(
-            domain=request.config.domain,
-            count=request.config.rowCount,
-            sentiment_distribution=sentiment_distribution
-        )
+        decrypted_api_key = decrypt_api_key(request.encryptedKey, ENCRYPTION_KEY)
 
         return {
-            "generated_data": [
-                {
-                    "id": item["id"],
-                    "text": item["text"],
-                    "sentiment": item["sentiment"]
-                }
-                for item in result["data"]
-            ]
+            "message": "Request processed successfully",
+            "decrypted_api_key": decrypted_api_key,
+            "config": request.config
         }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Couldnt fix it on friday so I will leave this on a branch and try using the huggingface PRO interference api and see how that goes
+@app.post("/mocked-secure-generate")
+async def mocked_secure_generate(
+    request: SecureGenerationRequest,
+    x_api_key: str = Depends(verify_api_key)
+):
+    security_manager = get_security_manager()
+    
+    
+
+    try:
+        # Mocked API key instead of decrypting
+        api_key = os.getenv('OPENAI_API_KEY')  # Replace with your actual OpenAI key
+        
+        # Initialize the OptimizedGenerationChain with the mocked API key and request configuration
+        chain = OptimizedGenerationChain(api_key, request.config.dict())
+        
+        # Generate and analyze data
+        result = await chain.generate_and_analyze()
+        
+        return result
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
