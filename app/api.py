@@ -1,21 +1,31 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from app.chains.sentiment_chain import SentimentAnalysisChain
 from app.config import get_settings
 from app.utils.cost_tracker import track_cost
 from app.chains.generation_chain import DataGenerationChain, MAX_RECORDS
 from app.chains.text_analysis_chain import TextAnalysisChain
+from concurrent.futures import ThreadPoolExecutor
+from app.routes import local_inference,hf_inference,generation 
+from app.utils import cache_manager
+from app.utils.auth import verify_api_key
+from app.routes.hf_inference import (
+    analyze_text_batch_hf, 
+    analyze_text_batch_hf_quick, 
+    analyze_text_batch_hf_large,
+    HuggingFaceRequest,  
+    LargeAnalysisRequest
+)
+from app.models.hf_models import HuggingFaceRequest, LargeAnalysisRequest
+
 app = FastAPI(title="Sentiment Data Handling & Analysis")
 
-
-async def verify_api_key(x_api_key: str = Header(...)):
-    if x_api_key != get_settings().API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API key"
-        )
-    return x_api_key
+app.include_router(local_inference.router)
+app.include_router(hf_inference.router)
+app.include_router(cache_manager.router)
+app.include_router(generation.router) 
 
 
 class TextInput(BaseModel):
@@ -208,7 +218,7 @@ async def generate_data_basic(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Add this new request model
+
 class SimpleGenerationRequest(BaseModel):
     domain: str
     count: int = Field(gt=0, le=MAX_RECORDS)
@@ -276,3 +286,41 @@ async def analyze_text_batch(
             "total_cost_usd": round(total_cost, 4)
         }
     }
+
+
+
+#Huggingface inference API , PRO version, gives you 20k rate limit per day
+@app.post("/analyze-text-batch-hf")
+async def analyze_text_batch_hf_endpoint(request: HuggingFaceRequest, _: str = Depends(verify_api_key)):
+    return await analyze_text_batch_hf(request, _)
+
+@app.post("/analyze-text-batch-hf-quick")
+async def analyze_text_batch_hf_quick_endpoint(request: HuggingFaceRequest, _: str = Depends(verify_api_key)):
+    return await analyze_text_batch_hf_quick(request, _)
+
+@app.post("/analyze-text-batch-hf-large")
+async def analyze_text_batch_hf_large_endpoint(request: LargeAnalysisRequest, _: str = Depends(verify_api_key)):
+    return await analyze_text_batch_hf_large(request, _)
+
+# Format results with robust response handling
+async def format_sentiment_result(result) -> Tuple[bool, float]:
+    try:
+        if isinstance(result, str):
+            # Handle unexpected string response
+            return False, 0.0
+            
+        if isinstance(result, list):
+            if not result:  # Empty list
+                return False, 0.0
+            sentiment_result = result[0]
+        else:
+            sentiment_result = result
+            
+        
+        label = sentiment_result.get("label", "")
+        score = sentiment_result.get("score", 0.0)
+        
+        return label == "POSITIVE", score
+    except Exception as e:
+        print(f"Error formatting result: {str(e)}, raw result: {result}")
+        return False, 0.0
