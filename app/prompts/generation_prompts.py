@@ -99,6 +99,18 @@ Focus areas:
 
 Remember: Only the "text" field is needed."""
 
+REVIEW_GENERATION_TEMPLATE = """Generate a detailed and authentic customer review for {domain}. The review should:
+
+1. Be written in first-person perspective
+2. Include specific details about the product/service
+3. Mention both positive and negative aspects
+4. Use natural, conversational language
+5. Include realistic details about usage/experience
+6. Be between 50-150 words
+7. Sound authentic and personal
+
+Review:"""
+
 def create_generation_prompt(
     domain: str,
     count: int,
