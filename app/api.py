@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Tuple
@@ -19,8 +19,34 @@ from app.routes.hf_inference import (
     LargeAnalysisRequest
 )
 from app.models.hf_models import HuggingFaceRequest, LargeAnalysisRequest
+from app.models.advanced_config import AdvancedConfig
+from app.utils.encryption import decrypt_api_key
+from app.models.advanced_config import AdvancedGenerationRequest
+import asyncio
+from typing import List, Dict
+import random
+from app.chains.gen_sen_chain import GenSenChain
+from fastapi.middleware.cors import CORSMiddleware
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sentiment Data Handling & Analysis")
+
+settings = get_settings()
+
+# Configure CORS with settings
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=False, 
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
+)
 
 app.include_router(local_inference.router)
 app.include_router(hf_inference.router)
@@ -63,7 +89,14 @@ async def analyze_texts(request: BatchRequest):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "cors_config": {
+            "origins": settings.CORS_ORIGINS,
+            "methods": settings.CORS_METHODS,
+            "headers": settings.CORS_HEADERS
+        }
+    }
 
 
 class RawTextInput(BaseModel):
@@ -289,6 +322,8 @@ async def analyze_text_batch(
 
 
 
+
+
 #Huggingface inference API , PRO version, gives you 20k rate limit per day
 @app.post("/analyze-text-batch-hf")
 async def analyze_text_batch_hf_endpoint(request: HuggingFaceRequest, _: str = Depends(verify_api_key)):
@@ -324,3 +359,105 @@ async def format_sentiment_result(result) -> Tuple[bool, float]:
     except Exception as e:
         print(f"Error formatting result: {str(e)}, raw result: {result}")
         return False, 0.0
+## Not used
+async def generate_sentiment_batch(
+    openai_key: str,
+    sentiment: str,
+    count: int,
+    config: AdvancedConfig
+) -> List[Dict]:
+    chain = DataGenerationChain(api_key=openai_key)
+    
+    prompt_config = f"""
+    Generate a {sentiment} review for the {config.domain} domain.
+    Consider the following parameters:
+    - Realism: {config.realism}
+    - Domain relevance: {config.domainRelevance}
+    - Formality: {config.formality}
+    - Lexical complexity: {config.lexicalComplexity}
+    - Cultural sensitivity: {config.culturalSensitivity}
+    
+    The response should be natural and maintain consistent sentiment.
+    """
+    
+    results = []
+    for _ in range(count):
+        result = await chain.generate_single(
+            prompt_config,
+            temperature=config.temperature,
+            top_p=config.topP,
+            max_tokens=config.maxTokens,
+            frequency_penalty=config.frequencyPenalty,
+            presence_penalty=config.presencePenalty
+        )
+        results.append({
+            "text": result["text"],
+            "sentiment": sentiment
+        })
+    
+    return results
+### Used and I will take apart the code and not just leave it all in api.py
+@app.post("/generate-advanced")
+async def generate_advanced_data(
+    request: AdvancedGenerationRequest,
+    strict: bool = Query(False, description="Ensure exact distribution and count matching")
+):
+    try:
+        logger.info("🚀 Starting advanced generation request")
+        logger.info(f"Domain: {request.config.domain}")
+        logger.info(f"Row Count: {request.config.rowCount}")
+        logger.info(f"Strict Mode: {strict}")
+        logger.info(f"Sentiment Distribution: positive={request.config.sentimentDistribution.positive}%, "
+                   f"negative={request.config.sentimentDistribution.negative}%, "
+                   f"neutral={request.config.sentimentDistribution.neutral}%")
+
+        openai_key = decrypt_api_key(request.encryptedKey)
+        logger.info("✅ API key decrypted successfully")
+        
+        chain = GenSenChain(api_key=openai_key)
+        logger.info("✅ GenSenChain initialized")
+        
+        distribution = {
+            "positive": int(request.config.rowCount * request.config.sentimentDistribution.positive / 100),
+            "negative": int(request.config.rowCount * request.config.sentimentDistribution.negative / 100),
+            "neutral": int(request.config.rowCount * request.config.sentimentDistribution.neutral / 100)
+        }
+        logger.info(f"📊 Calculated distribution: {distribution}")
+        
+        config = {
+            "realism": request.config.realism,
+            "domainRelevance": request.config.domainRelevance,
+            "formality": request.config.formality,
+            "lexicalComplexity": request.config.lexicalComplexity,
+            "culturalSensitivity": request.config.culturalSensitivity,
+            "temperature": request.config.temperature,
+            "topP": request.config.topP,
+            "maxTokens": request.config.maxTokens,
+            "frequencyPenalty": request.config.frequencyPenalty,
+            "presencePenalty": request.config.presencePenalty,
+            "strict": strict
+        }
+        logger.info("✅ Configuration prepared")
+        
+        logger.info("🔄 Starting batch generation...")
+        result = await chain.batch_generate(
+            domain=request.config.domain,
+            distribution=distribution,
+            config=config
+        )
+        logger.info(f"✅ Generation complete. Generated {result['summary']['total']} items")
+        
+        response = {
+            "generated_data": result["data"],
+            "summary": {
+                "total_generated": result["summary"]["total"],
+                "sentiment_distribution": result["summary"]["distribution"]
+            }
+        }
+        logger.info("🏁 Request completed successfully")
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ Error in generate_advanced_data: {str(e)}")
+        logger.exception("Detailed error trace:")
+        raise HTTPException(status_code=500, detail=str(e))
