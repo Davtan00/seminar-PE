@@ -10,6 +10,7 @@ from app.chains.text_analysis_chain import TextAnalysisChain
 from concurrent.futures import ThreadPoolExecutor
 from app.routes import local_inference,hf_inference,generation 
 from app.utils import cache_manager
+from app.analysis.pdf_generator import SentimentAnalysisReport
 from app.utils.auth import verify_api_key
 from app.routes.hf_inference import (
     analyze_text_batch_hf, 
@@ -28,6 +29,14 @@ import random
 from app.chains.gen_sen_chain import GenSenChain
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import uuid
+import asyncio
+import os
+from fastapi.responses import FileResponse
+from cachetools import TTLCache
+
+pdf_cache = TTLCache(maxsize=100, ttl=3600)  # 1 hour TTL
+analysis_status = TTLCache(maxsize=100, ttl=3600)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -446,18 +455,97 @@ async def generate_advanced_data(
             config=config
         )
         logger.info(f"✅ Generation complete. Generated {result['summary']['total']} items")
+        # Generate unique ID
+        request_id = str(uuid.uuid4())
         
-        response = {
+        # Start analysis in background
+        analysis_status[request_id] = "processing"
+        asyncio.create_task(generate_analysis_pdf(request_id, result["data"]))
+        response_data = {
+            "request_id": request_id,
             "generated_data": result["data"],
             "summary": {
                 "total_generated": result["summary"]["total"],
                 "sentiment_distribution": result["summary"]["distribution"]
             }
         }
+        
         logger.info("🏁 Request completed successfully")
-        return response
+        return response_data 
         
     except Exception as e:
         logger.error(f"❌ Error in generate_advanced_data: {str(e)}")
         logger.exception("Detailed error trace:")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/analysis/status/{request_id}")
+async def get_analysis_status(request_id: str):
+    """Check the status of PDF generation"""
+    status = analysis_status.get(request_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="Analysis not found or expired")
+    
+    return {"status": status}
+
+@app.get("/analysis/download/{request_id}")
+async def download_analysis(request_id: str):
+    """Download the generated PDF analysis"""
+    try:
+        status = analysis_status.get(request_id)
+        if not status:
+            raise HTTPException(status_code=404, detail="Analysis not found or expired")
+            
+        if status == "processing":
+            raise HTTPException(status_code=202, detail="Analysis still processing")
+            
+        if status == "error":
+            raise HTTPException(status_code=500, detail="Error generating analysis")
+            
+        pdf_path = pdf_cache.get(request_id)
+        if not pdf_path or not os.path.exists(pdf_path):
+            raise HTTPException(status_code=404, detail="PDF file not found")
+        
+        # Schedule cleanup after 10 minutes
+        asyncio.create_task(cleanup_after_delay(request_id, pdf_path))
+        
+        return FileResponse(
+            path=pdf_path,
+            media_type='application/pdf',
+            filename=f'synthetic_data_analysis_{request_id}.pdf'
+        )
+        
+    except Exception as e:
+        logger.error(f"Error downloading analysis: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def cleanup_after_delay(request_id: str, pdf_path: str, delay: int = 600):
+    """Cleanup cache and PDF file after delay"""
+    await asyncio.sleep(delay)
+    try:
+        # Get the analyzer instance if it exists
+        if request_id in analysis_status:
+            analyzer = SentimentAnalysisReport(data=[], request_id=request_id)  # Empty data as we're just cleaning up
+            analyzer.cleanup()
+        
+        # Clean up cache entries
+        pdf_cache.pop(request_id, None)
+        analysis_status.pop(request_id, None)
+    except Exception as e:
+        logger.error(f"Error during cleanup for request {request_id}: {str(e)}")
+
+async def generate_analysis_pdf(request_id: str, data: list):
+    """Background task to generate PDF analysis"""
+    analyzer = None
+    try:
+        analyzer = SentimentAnalysisReport(data=data, request_id=request_id)
+        pdf_path = analyzer.generate_report()
+        pdf_cache[request_id] = pdf_path
+        analysis_status[request_id] = "ready"
+    except Exception as e:
+        logger.error(f"Error generating PDF analysis: {str(e)}")
+        analysis_status[request_id] = "error"
+    finally:
+        # Ensure cleanup of temporary files if there's an error
+        if analyzer and analysis_status[request_id] == "error":
+            analyzer.cleanup()        
