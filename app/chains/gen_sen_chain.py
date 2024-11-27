@@ -44,6 +44,9 @@ class GenSenChain:
             try:
                 await self.rate_limiter.wait_if_needed()
                 
+                # Log the batch parameters for debugging
+                logger.debug(f"Processing batch with parameters: {batch_params}")
+                
                 user_prompt = f"""Generate {batch_params['count']} {batch_params['sentiment']} reviews for the {batch_params['domain']} domain.
                     Apply these style parameters:
                     - Realism: {batch_params['realism']}
@@ -84,7 +87,16 @@ class GenSenChain:
                         await asyncio.sleep(2)
                         continue
                         
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Unexpected response status: {response.status}, response: {error_text}")
+                        retries -= 1
+                        await asyncio.sleep(1)
+                        continue
+                        
                     response_data = await response.json()
+                    logger.debug(f"API response data: {response_data}")
+                    
                     content = response_data["choices"][0]["message"]["content"]
                     parsed_data = json.loads(content)
                     
@@ -93,11 +105,43 @@ class GenSenChain:
                     
                     return parsed_data["reviews"]
                     
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"JSON decode error in batch processing:\n"
+                    f"Error: {str(e)}\n"
+                    f"Batch params: {batch_params}\n"
+                    f"Retries left: {retries}",
+                    exc_info=True
+                )
+                retries -= 1
+                await asyncio.sleep(1)
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"HTTP client error in batch processing:\n"
+                    f"Error type: {type(e).__name__}\n"
+                    f"Error: {str(e)}\n"
+                    f"Batch params: {batch_params}\n"
+                    f"Retries left: {retries}",
+                    exc_info=True
+                )
+                retries -= 1
+                await asyncio.sleep(1)
             except Exception as e:
-                logger.error(f"Batch processing error: {str(e)}")
+                logger.error(
+                    f"Unexpected error in batch processing:\n"
+                    f"Error type: {type(e).__name__}\n"
+                    f"Error: {str(e)}\n"
+                    f"Batch params: {batch_params}\n"
+                    f"Retries left: {retries}",
+                    exc_info=True
+                )
+                # Log the full context of the error
+                import traceback
+                logger.error(f"Full traceback:\n{traceback.format_exc()}")
                 retries -= 1
                 await asyncio.sleep(1)
                 
+        logger.error(f"All retries exhausted for batch with parameters: {batch_params}")
         return None
 
     async def batch_generate(
@@ -110,13 +154,20 @@ class GenSenChain:
             all_reviews = []
             tasks = []
             
+            # Log the initial parameters
+            logger.info(f"Starting batch generation with distribution: {distribution}")
+            logger.info(f"Domain: {domain}")
+            logger.info(f"Config: {config}")
+            
             async with aiohttp.ClientSession() as session:
                 for sentiment, count in distribution.items():
                     if count <= 0:
                         continue
                         
-                    batch_size = min(5, count)  # Smaller batch size for better parallelization
+                    batch_size = min(5, count)
                     num_batches = (count + batch_size - 1) // batch_size
+                    
+                    logger.info(f"Creating {num_batches} batches of size {batch_size} for {sentiment} sentiment")
                     
                     for i in range(num_batches):
                         current_batch_size = min(batch_size, count - i * batch_size)
@@ -125,16 +176,27 @@ class GenSenChain:
                             "count": current_batch_size,
                             "sentiment": sentiment,
                             "domain": domain,
-                            **{k.lower(): v for k, v in config.items()}  # Convert keys to lowercase
+                            **{k.lower(): v for k, v in config.items()}
                         }
                         
                         tasks.append(self.process_batch(session, batch_params))
                 
-                # Process all batches concurrently with rate limiting
+                # Process all batches concurrently with rate limiting and better error handling
                 for batch_results in asyncio.as_completed(tasks):
-                    reviews = await batch_results
-                    if reviews:
-                        all_reviews.extend(reviews)
+                    try:
+                        reviews = await batch_results
+                        if reviews:
+                            all_reviews.extend(reviews)
+                            logger.info(f"Successfully processed batch. Total reviews so far: {len(all_reviews)}")
+                        else:
+                            logger.warning("Batch processing returned None")
+                    except Exception as e:
+                        logger.error(
+                            f"Error processing batch result:\n"
+                            f"Error type: {type(e).__name__}\n"
+                            f"Error: {str(e)}",
+                            exc_info=True
+                        )
 
             # Add IDs and calculate distribution
             for i, review in enumerate(all_reviews):
@@ -155,7 +217,15 @@ class GenSenChain:
             }
             
         except Exception as e:
-            logger.error(f"Error in batch_generate: {str(e)}")
+            logger.error(
+                f"Critical error in batch_generate:\n"
+                f"Error type: {type(e).__name__}\n"
+                f"Error: {str(e)}\n"
+                f"Distribution: {distribution}\n"
+                f"Domain: {domain}\n"
+                f"Config: {config}",
+                exc_info=True
+            )
             raise HTTPException(
                 status_code=500,
                 detail=f"Error in batch generation: {str(e)}"
