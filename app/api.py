@@ -454,13 +454,19 @@ async def generate_advanced_data(
             distribution=distribution,
             config=config
         )
+        
+        if not result or not result.get("data"):
+            raise HTTPException(status_code=500, detail="Failed to generate data")
+            
         logger.info(f"✅ Generation complete. Generated {result['summary']['total']} items")
+        
         # Generate unique ID
         request_id = str(uuid.uuid4())
         
-        # Start analysis in background
+        # Start analysis and set initial status
         analysis_status[request_id] = "processing"
         asyncio.create_task(generate_analysis_pdf(request_id, result["data"]))
+        
         response_data = {
             "request_id": request_id,
             "generated_data": result["data"],
@@ -471,11 +477,15 @@ async def generate_advanced_data(
         }
         
         logger.info("🏁 Request completed successfully")
-        return response_data 
+        return response_data
         
     except Exception as e:
         logger.error(f"❌ Error in generate_advanced_data: {str(e)}")
         logger.exception("Detailed error trace:")
+        # Ensure status is set to error and cleanup is triggered
+        if 'request_id' in locals():
+            analysis_status[request_id] = "error"
+            pdf_cache.pop(request_id, None)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -545,7 +555,13 @@ async def generate_analysis_pdf(request_id: str, data: list):
     except Exception as e:
         logger.error(f"Error generating PDF analysis: {str(e)}")
         analysis_status[request_id] = "error"
+        # Ensure cleanup happens on error
+        if analyzer:
+            analyzer.cleanup()
+        # Remove from cache
+        pdf_cache.pop(request_id, None)
     finally:
-        # Ensure cleanup of temporary files if there's an error
-        if analyzer and analysis_status[request_id] == "error":
-            analyzer.cleanup()        
+        # Set a timeout for cleanup even if status is 'ready'
+        asyncio.create_task(
+            cleanup_after_delay(request_id, analyzer.output_path if analyzer else None)
+        )      

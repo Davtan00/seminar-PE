@@ -80,9 +80,9 @@ class SentimentAnalysisReport:
         ax[0].set_xlabel('Sentiment')
         ax[0].set_ylabel('Frequency')
         
-        sns.histplot(self.df['length'], kde=True, label='Synthetic Tweets', color='#f79c42', stat='density', ax=ax[1])
-        ax[1].set_title('Synthetic Tweet Length Distribution')
-        ax[1].set_xlabel('Tweet Length')
+        sns.histplot(self.df['length'], kde=True, label='Synthetic Reviews', color='#f79c42', stat='density', ax=ax[1])
+        ax[1].set_title('Synthetic Review Length Distribution')
+        ax[1].set_xlabel('Review Length')
         ax[1].set_ylabel('Density')
         ax[1].legend()
 
@@ -158,13 +158,15 @@ class SentimentAnalysisReport:
 
         fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
+        axes[0].set_xticks(range(10))
+        axes[0].set_xticklabels(bigram_terms[:10], rotation=45, ha='right')
         axes[0].bar(bigram_terms[:10], bigram_freq[:10], color='#9b59b6')
         axes[0].set_title('Top 10 Bigrams')
-        axes[0].set_xticklabels(bigram_terms[:10], rotation=45, ha='right')
 
+        axes[1].set_xticks(range(10))
+        axes[1].set_xticklabels(trigram_terms[:10], rotation=45, ha='right')
         axes[1].bar(trigram_terms[:10], trigram_freq[:10], color='#f39c12')
         axes[1].set_title('Top 10 Trigrams')
-        axes[1].set_xticklabels(trigram_terms[:10], rotation=45, ha='right')
 
         plt.tight_layout()
         plt.savefig(ngram_path)
