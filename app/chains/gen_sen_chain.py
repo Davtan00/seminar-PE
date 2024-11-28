@@ -21,25 +21,25 @@ max_tokens_per_request = 8000
 
 @dataclass
 class TokenEstimates:
-    base_prompt_tokens: int = 260  # Actual measured #With old prompt 140
-    tokens_per_review: int = 50    # ~33 tokens + small safety margin
-    json_overhead: int = 15        # JSON structure overhead
+    base_prompt_tokens: int = 80
+    tokens_per_review: int = 50
+    json_overhead: int = 10
 
     def get_total_tokens_for_batch(self, batch_size: int) -> int:
-        """Calculate total tokens needed for a batch, including safety margin"""
         return (
-            self.base_prompt_tokens +  # 140 tokens
-            (self.tokens_per_review * batch_size) +  # 50 tokens per review
-            self.json_overhead +  # 15 tokens
-            25  # Smaller safety margin
+            self.base_prompt_tokens +
+            (self.tokens_per_review * batch_size) +
+            self.json_overhead +
+            25  # Safety margin
         )
 
 @dataclass
 class RateLimits:
-    requests_per_minute: int
-    tokens_per_minute: int
-    tokens_per_hour: int
-    min_quality_threshold: int = 25  # Capped at 25 reviews per batch
+    def __init__(self):
+        self.requests_per_minute = 5000
+        self.tokens_per_minute = 4_000_000
+        self.tokens_per_hour = 100_000_000
+        self.min_quality_threshold = 100  # Increased significantly
 
 class RateLimiter:
     def __init__(self, rate_limits: RateLimits):
@@ -48,6 +48,8 @@ class RateLimiter:
         self.remaining_requests = rate_limits.requests_per_minute
         self.remaining_tokens = rate_limits.tokens_per_minute
         self.last_update = time.time()
+        self.request_times = []  # Track request timestamps
+        self.token_usage = []    # Track token usage
 
     def update_limits(self, headers: Dict[str, str]):
         self.remaining_requests = int(headers.get('x-ratelimit-remaining-requests', self.remaining_requests))
@@ -55,9 +57,25 @@ class RateLimiter:
         self.last_update = time.time()
 
     async def wait_if_needed(self):
-        if self.remaining_requests < 100:  # Higher threshold
-            await asyncio.sleep(1)  # Longer sleep, less frequent
-        return self.remaining_requests > 0 and self.remaining_tokens > 0
+        current_time = time.time()
+        # Clean up old entries
+        self.request_times = [t for t in self.request_times if current_time - t < 60]
+        self.token_usage = [t for t in self.token_usage if current_time - t[1] < 60]
+        
+        requests_last_minute = len(self.request_times)
+        tokens_last_minute = sum(tokens for tokens, _ in self.token_usage)
+        
+        if requests_last_minute >= self.requests_limit * 0.95:  # 95% of limit
+            await asyncio.sleep(0.5)
+        elif tokens_last_minute >= self.tokens_limit * 0.95:
+            await asyncio.sleep(0.5)
+        
+        return True
+
+    def record_usage(self, tokens_used: int):
+        current_time = time.time()
+        self.request_times.append(current_time)
+        self.token_usage.append((tokens_used, current_time))
 
 class BatchOptimizer:
     def __init__(
@@ -74,14 +92,17 @@ class BatchOptimizer:
         def get_tokens_per_batch(batch_size: int) -> int:
             return self.token_estimates.get_total_tokens_for_batch(batch_size)
 
-        is_small_job = self.total_reviews <= 10000
+        is_small_job = self.total_reviews <= 50000  # Increased threshold
         
-        # For small jobs, we can be more aggressive with concurrency
-          # Increased but won't hit this due to review cap
         theoretical_max_reviews = min(
-            25,  # Hard cap at 25 reviews
+            100,  # Increased from 50 to 100 reviews per batch
             (max_tokens_per_request - self.token_estimates.base_prompt_tokens - self.token_estimates.json_overhead) // self.token_estimates.tokens_per_review
         )
+        
+        # More aggressive batch sizes
+        min_batch_size = 50 if is_small_job else 25  # Increased minimum batch sizes
+        max_concurrent_cap = 400 if is_small_job else 200  # Increased concurrency
+        safety_factor = 0.98 if is_small_job else 0.95  # More aggressive safety factors
         
         # Calculate theoretical max based on rate limits
         theoretical_max_by_tokens = (self.rate_limits.tokens_per_minute // 60) // self.token_estimates.get_total_tokens_for_batch(1)
@@ -105,10 +126,6 @@ class BatchOptimizer:
             max_concurrent_by_rpm = self.rate_limits.requests_per_minute // 60
             max_concurrent_by_tpm = (self.rate_limits.tokens_per_minute // 60) // tokens_per_batch
             max_concurrent_by_tph = (self.rate_limits.tokens_per_hour // 3600) // tokens_per_batch
-            
-            # Much more aggressive concurrency for small jobs
-            max_concurrent_cap = 150 if is_small_job else 50  # Increased from 75 to 150
-            safety_factor = 0.95 if is_small_job else 0.8    # Increased from 0.9 to 0.95
             
             concurrent_tasks = min(
                 max_concurrent_by_rpm,
@@ -166,20 +183,17 @@ class GenSenChain:
     def __init__(self, api_key: str = None):
         self.api_key = api_key
         self.domain_configs = DOMAIN_CONFIGS
-        rate_limits = RateLimits(
-            requests_per_minute=5000,
-            tokens_per_minute=4_000_000,
-            tokens_per_hour=100_000_000
-        )
+        rate_limits = RateLimits()
         self.rate_limiter = RateLimiter(rate_limits)
         self.token_estimates = TokenEstimates()
         self.concurrency_manager = ConcurrencyManager(
-            initial=200,
-            min_limit=100,
-            max_limit=300,
-            increment=10,
-            decrement=20
+            initial=400,    # Increased for better throughput
+            min_limit=250,  
+            max_limit=600,  # Higher max limit
+            increment=30,   
+            decrement=50    
         )
+        self.request_semaphore = asyncio.Semaphore(500)  # Control concurrent requests
 
     async def get_token_count(self, messages: List[Dict[str, str]]) -> int:
         """Estimate token count before making API call"""
@@ -200,7 +214,7 @@ class GenSenChain:
         batch_params: Dict[str, Any],
         retries: int = 3
     ) -> Optional[List[Dict[str, Any]]]:
-        async with self.concurrency_manager:
+        async with self.request_semaphore:  # Control concurrent requests
             try:
                 await self.rate_limiter.wait_if_needed()
                 
@@ -228,7 +242,15 @@ class GenSenChain:
 
                 
                 dynamic_system_prompt = f"""Generate authentic {batch_params['domain']} reviews with {batch_params['sentiment']} sentiment.
-Output: {{"reviews":[{{"text":"content","sentiment":"{batch_params['sentiment']}"}}]}}"""
+Return a JSON object with the following schema:
+{{
+  "reviews": [
+    {{
+      "text": string,  // The review content
+      "sentiment": "{batch_params['sentiment']}"  // The sentiment of the review
+    }}
+  ]
+}}"""
 
                 messages = [
                     {"role": "system", "content": dynamic_system_prompt},
@@ -264,45 +286,57 @@ Output: {{"reviews":[{{"text":"content","sentiment":"{batch_params['sentiment']}
                                 "messages": messages,
                                 "response_format": {"type": "json_object"},
                                 "temperature": batch_params.get("temperature", 0.7),
-                                "max_tokens": batch_params.get(max_tokens_per_request),
-                                "top_p": batch_params.get("topP", 1.0),
-                                "frequency_penalty": batch_params.get("frequencyPenalty", 0.0),
-                                "presence_penalty": batch_params.get("presencePenalty", 0.)
+                                "max_tokens": max_tokens_per_request,
+                                "top_p": batch_params.get("topp", 1.0),
+                                "frequency_penalty": batch_params.get("frequencypenalty", 0),
+                                "presence_penalty": batch_params.get("presencepenalty", 0)
                             }
                         ) as response:
-                            self.rate_limiter.update_limits(response.headers)
-                            
-                            if response.status == 429:
-                                logger.warning("Rate limit hit, retrying after delay...")
-                                retries -= 1
-                                await asyncio.sleep(1)
-                                continue
-                            
                             if response.status != 200:
                                 error_text = await response.text()
-                                logger.error(f"Unexpected response status: {response.status}, response: {error_text}")
-                                retries -= 1
-                                await asyncio.sleep(1)
-                                continue
-                            
+                                logger.error(
+                                    f"OpenAI API error:\n"
+                                    f"Status: {response.status}\n"
+                                    f"Response: {error_text}"
+                                )
+                                raise aiohttp.ClientError(f"API error: {error_text}")
+
                             response_data = await response.json()
                             logger.debug(f"API response data: {response_data}")
                             
-                            content = response_data["choices"][0]["message"]["content"]
-                            parsed_data = json.loads(content)
-                            
-                            if "reviews" not in parsed_data:
-                                raise ValueError("Response missing 'reviews' array")
-                            
-                            reviews = parsed_data["reviews"]
-                            for review in reviews:
-                                if "sentiment" not in review:
-                                    review["sentiment"] = batch_params["sentiment"]
-                                if "text" not in review:
-                                    logger.warning(f"Review missing text field, skipping: {review}")
-                                    continue
-                            
-                            collected_reviews.extend(reviews)
+                            try:
+                                content = response_data["choices"][0]["message"]["content"]
+                                parsed_data = json.loads(content)
+                                
+                                if "reviews" not in parsed_data:
+                                    logger.error(f"Invalid JSON structure received: {content}")
+                                    raise ValueError("Response missing 'reviews' array")
+                                
+                                reviews = parsed_data["reviews"]
+                                processed_reviews = []
+                                
+                                for review in reviews:
+                                    if not isinstance(review, dict):
+                                        logger.warning(f"Skipping invalid review format: {review}")
+                                        continue
+                                        
+                                    if "text" not in review:
+                                        logger.warning(f"Review missing text field: {review}")
+                                        continue
+                                        
+                                    # Ensure review is a proper dictionary with all required fields
+                                    processed_review = {
+                                        "text": str(review["text"]),
+                                        "sentiment": review.get("sentiment", batch_params["sentiment"]),
+                                        "rating": float(review.get("rating", 0)) if "rating" in review else None
+                                    }
+                                    processed_reviews.append(processed_review)
+                                
+                                collected_reviews.extend(processed_reviews)
+                                
+                            except json.JSONDecodeError as e:
+                                logger.error(f"JSON decode error: {str(e)}\nContent: {content}")
+                                raise
                             
                             # Calculate remaining reviews
                             total_requested -= len(reviews)
@@ -369,11 +403,7 @@ Output: {{"reviews":[{{"text":"content","sentiment":"{batch_params['sentiment']}
                 )
 
             total_reviews = sum(distribution.values())
-            rate_limits = RateLimits(
-                requests_per_minute=5000,
-                tokens_per_minute=4_000_000,
-                tokens_per_hour=100_000_000
-            )
+            rate_limits = RateLimits()
             
             optimizer = BatchOptimizer(total_reviews, rate_limits)
             optimal_config = optimizer.calculate_optimal_batch_size()
