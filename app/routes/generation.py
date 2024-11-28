@@ -107,6 +107,7 @@ async def generate_and_analyze_hf(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Optional: Add an endpoint that allows choosing the generation and analysis providers
+# Adapt it to the changes inwhat we expected format wise.
 @router.post("/hybrid")
 async def generate_and_analyze_hybrid(
     request: GenerationRequest,
