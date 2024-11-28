@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 ### Only so fast because of rate limit, but we aren't pushing it so hard so perhaps T2,T1 would be okay performance wise as well.
 @dataclass
 class TokenEstimates:
-    base_prompt_tokens: int = 140  # Actual measured
+    base_prompt_tokens: int = 260  # Actual measured #With old prompt 140
     tokens_per_review: int = 50    # ~33 tokens + small safety margin
     json_overhead: int = 15        # JSON structure overhead
 
@@ -136,6 +136,39 @@ class BatchOptimizer:
         logger.info(f"Calculated optimal configuration: {optimal_config}")
         return optimal_config
 
+@dataclass
+class ReviewParameters:
+    # Primary parameters
+    privacy_level: float
+    domain_relevance: float
+    cultural_sensitivity: float
+    bias_control: float
+    
+    # Style parameters
+    realism: float
+    formality: float
+    lexical_complexity: float
+    sentiment_intensity: float
+    temporal_relevance: float
+    noise_level: float
+    
+    def get_prompt_description(self) -> str:
+        return f"""Primary Parameters:
+        - Privacy level: {self.privacy_level} (ensure maximum anonymization; avoid any specific identifiable details)
+        - Domain relevance: {self.domain_relevance} (maintain strong focus on domain-specific content and terminology)
+        - Cultural sensitivity: {self.cultural_sensitivity} (use highly inclusive language; be considerate of diverse backgrounds)
+        - Bias control: {self.bias_control} (actively minimize demographic, cultural, and personal biases)
+        
+        Style Parameters:
+        - Realism: {self.realism} (produce authentic-sounding content matching real user behavior)
+        - Formality: {self.formality} (adjust language formality from casual to professional)
+        - Lexical complexity: {self.lexical_complexity} (control vocabulary complexity and sentence structure)
+        - Sentiment intensity: {self.sentiment_intensity} (modulate the strength of emotional expression)
+        - Temporal relevance: {self.temporal_relevance} (include current trends and contemporary references)
+        - Noise level: {self.noise_level} (control amount of tangential or supplementary information)"""
+
+
+
 class GenSenChain:
     def __init__(self, api_key: str = None):
         self.api_key = api_key
@@ -147,7 +180,7 @@ class GenSenChain:
         self.rate_limiter = RateLimiter(rate_limits)
         self.token_estimates = TokenEstimates()
         
-        self.system_prompt = """You are a specialized content generator that creates realistic reviews or comments.
+        self.system_prompt = """You are a specialized content generator that creates synthetic reviews or comments.
             Your output must be a JSON object with a 'reviews' array containing the generated items.
             Each item must have 'text' and 'sentiment' fields."""
 
@@ -160,21 +193,39 @@ class GenSenChain:
         total_requested = batch_params['count']
         collected_reviews = []
 
+        # Add domain validation
+        if batch_params['domain'].lower() == 'all':
+            raise HTTPException(
+                status_code=400,
+                detail="Please specify a concrete domain for review generation"
+            )
+        
         while retries > 0 and total_requested > 0:
             try:
                 await self.rate_limiter.wait_if_needed()
                 
-                # Log the batch parameters for debugging
-                logger.debug(f"Processing batch with parameters: {batch_params}")
-                
-                user_prompt = f"""Generate {total_requested} {batch_params['sentiment']} reviews for the {batch_params['domain']} domain.
-                    Apply these style parameters:
-                    - Realism: {batch_params['realism']}
-                    - Domain relevance: {batch_params['domainrelevance']}
-                    - Formality: {batch_params['formality']}
-                    - Lexical complexity: {batch_params['lexicalcomplexity']}
-                    - Cultural sensitivity: {batch_params['culturalsensitivity']}
+                # Create ReviewParameters instance from batch_params
+                parameters = ReviewParameters(
+                    privacy_level=batch_params.get('privacy_level', 0.8),
+                    domain_relevance=batch_params.get('domainrelevance', 0.8), ##Maybe remove, conflicts with system prompt
+                    cultural_sensitivity=batch_params.get('culturalsensitivity', 0.8),
+                    bias_control=batch_params.get('bias_control', 0.7),
                     
+                    realism=batch_params.get('realism', 0.7),
+                    formality=batch_params.get('formality', 0.5),
+                    lexical_complexity=batch_params.get('lexicalcomplexity', 0.5),
+                    sentiment_intensity=batch_params.get('sentiment_intensity', 0.5),
+                    temporal_relevance=batch_params.get('temporal_relevance', 0.5),
+                    noise_level=batch_params.get('noise_level', 0.3)
+                )
+                logger.debug(f"Processing batch with parameters: {parameters}")
+                # Construct the new user prompt
+                user_prompt = f"""Generate {total_requested} {batch_params['sentiment']} reviews specifically about {batch_params['domain']}.
+                    Focus on concrete aspects, features, or experiences related to {batch_params['domain']}.
+                    Avoid generic statements that could apply to any domain.
+
+                    {parameters.get_prompt_description()}
+
                     Respond with a JSON object containing an array of reviews."""
 
                 messages = [
@@ -278,6 +329,14 @@ class GenSenChain:
         config: Dict[str, Any]
     ) -> Dict[str, Any]:
         try:
+            # Add domain validation
+            valid_domains = ['ecommerce', 'social_media', 'software', 'restaurant', 'hotel', 'technology', 'education','healthcare']  
+            if domain.lower() not in valid_domains:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid domain. Please choose from: {', '.join(valid_domains)}"
+                )
+
             total_reviews = sum(distribution.values())
             rate_limits = RateLimits(
                 requests_per_minute=5000,
@@ -290,15 +349,17 @@ class GenSenChain:
             
             batch_size = optimal_config['batch_size']
             max_concurrent = optimal_config['concurrent_tasks']
-            
             all_reviews = []
             semaphore = asyncio.Semaphore(max_concurrent)
-            
+
             async with aiohttp.ClientSession() as session:
                 async def bounded_process_batch(batch_params):
                     async with semaphore:
                         return await self.process_batch(session, batch_params)
-                
+
+           
+            
+          
                 tasks = []
                 for sentiment, count in distribution.items():
                     if count <= 0:
@@ -306,7 +367,7 @@ class GenSenChain:
                     
                     num_batches = (count + batch_size - 1) // batch_size
                     logger.info(f"Creating {num_batches} batches of size {batch_size} for {sentiment} sentiment")
-                    
+                
                     for i in range(num_batches):
                         current_batch_size = min(batch_size, count - i * batch_size)
                         batch_params = {
@@ -316,16 +377,14 @@ class GenSenChain:
                             **{k.lower(): v for k, v in config.items()}
                         }
                         tasks.append(bounded_process_batch(batch_params))
-                
-                # Process all batches concurrently with rate limiting and better error handling
+
+                        
                 for batch_results in asyncio.as_completed(tasks):
                     try:
                         reviews = await batch_results
                         if reviews:
                             all_reviews.extend(reviews)
                             logger.info(f"Successfully processed batch. Total reviews so far: {len(all_reviews)}")
-                        else:
-                            logger.warning("Batch processing returned None")
                     except Exception as e:
                         logger.error(
                             f"Error processing batch result:\n"
@@ -334,7 +393,7 @@ class GenSenChain:
                             exc_info=True
                         )
 
-            # Add IDs and calculate distribution
+             # Add IDs and calculate distribution
             for i, review in enumerate(all_reviews):
                 review["id"] = i + 1
             
