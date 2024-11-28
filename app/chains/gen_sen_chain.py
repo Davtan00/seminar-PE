@@ -193,7 +193,12 @@ class GenSenChain:
             increment=30,   
             decrement=50    
         )
-        self.request_semaphore = asyncio.Semaphore(500)  # Control concurrent requests
+        self.request_semaphore = asyncio.Semaphore(500)
+        self.base_timeout = aiohttp.ClientTimeout(
+            total=300,    # Total timeout
+            connect=30,   # Connection timeout
+            sock_read=90  # Socket read timeout
+        )
 
     async def get_token_count(self, messages: List[Dict[str, str]]) -> int:
         """Estimate token count before making API call"""
@@ -214,7 +219,7 @@ class GenSenChain:
         batch_params: Dict[str, Any],
         retries: int = 3
     ) -> Optional[List[Dict[str, Any]]]:
-        async with self.request_semaphore:  # Control concurrent requests
+        async with self.request_semaphore:
             try:
                 await self.rate_limiter.wait_if_needed()
                 
@@ -271,10 +276,15 @@ Return a JSON object with the following schema:
                         detail=f"Invalid domain. Please choose from: {', '.join(self.domain_configs.keys())}"
                     )
                 
-                while retries > 0 and total_requested > 0:
+                retry_count = 0
+                while retry_count < retries and total_requested > 0:
                     try:
-                        await self.rate_limiter.wait_if_needed()
-                        
+                        # Exponential backoff for retries
+                        if retry_count > 0:
+                            wait_time = min(32, (2 ** retry_count))
+                            logger.info(f"Retry {retry_count}/{retries}, waiting {wait_time} seconds")
+                            await asyncio.sleep(wait_time)
+
                         async with session.post(
                             "https://api.openai.com/v1/chat/completions",
                             headers={
@@ -290,8 +300,16 @@ Return a JSON object with the following schema:
                                 "top_p": batch_params.get("topp", 1.0),
                                 "frequency_penalty": batch_params.get("frequencypenalty", 0),
                                 "presence_penalty": batch_params.get("presencepenalty", 0)
-                            }
+                            },
+                            timeout=self.base_timeout
                         ) as response:
+                            if response.status == 429:  # Rate limit
+                                retry_after = int(response.headers.get('Retry-After', 1))
+                                logger.warning(f"Rate limit hit, waiting {retry_after} seconds")
+                                await asyncio.sleep(retry_after)
+                                retry_count += 1
+                                continue
+
                             if response.status != 200:
                                 error_text = await response.text()
                                 logger.error(
@@ -328,7 +346,6 @@ Return a JSON object with the following schema:
                                     processed_review = {
                                         "text": str(review["text"]),
                                         "sentiment": review.get("sentiment", batch_params["sentiment"]),
-                                        "rating": float(review.get("rating", 0)) if "rating" in review else None
                                     }
                                     processed_reviews.append(processed_review)
                                 
@@ -344,43 +361,24 @@ Return a JSON object with the following schema:
                             if total_requested <= 0:
                                 return collected_reviews
                             
-                    except json.JSONDecodeError as e:
+                    except (aiohttp.ClientError, json.JSONDecodeError) as e:
                         logger.error(
-                            f"JSON decode error in batch processing:\n"
-                            f"Error: {str(e)}\n"
-                            f"Batch params: {batch_params}\n"
-                            f"Retries left: {retries}",
-                            exc_info=True
-                        )
-                        retries -= 1
-                        await asyncio.sleep(1)
-                    except aiohttp.ClientError as e:
-                        logger.error(
-                            f"HTTP client error in batch processing:\n"
+                            f"Error in batch processing:\n"
                             f"Error type: {type(e).__name__}\n"
                             f"Error: {str(e)}\n"
                             f"Batch params: {batch_params}\n"
-                            f"Retries left: {retries}",
-                            exc_info=True
+                            f"Retries left: {retries - retry_count}"
                         )
-                        retries -= 1
-                        await asyncio.sleep(1)
+                        retry_count += 1
+                        if retry_count >= retries:
+                            if collected_reviews:  # Return partial results if we have any
+                                return collected_reviews
+                            raise
+
                     except Exception as e:
-                        logger.error(
-                            f"Unexpected error in batch processing:\n"
-                            f"Error type: {type(e).__name__}\n"
-                            f"Error: {str(e)}\n"
-                            f"Batch params: {batch_params}\n"
-                            f"Retries left: {retries}",
-                            exc_info=True
-                        )
-                        # Log the full context of the error
-                        import traceback
-                        logger.error(f"Full traceback:\n{traceback.format_exc()}")
-                        retries -= 1
-                        await asyncio.sleep(1)
-                
-                logger.error(f"All retries exhausted for batch with parameters: {batch_params}")
+                        logger.error(f"Unexpected error in batch processing: {str(e)}", exc_info=True)
+                        raise
+
                 return collected_reviews if collected_reviews else None
             except aiohttp.ClientError as e:
                 if "429" in str(e):
