@@ -439,9 +439,16 @@ async def generate_advanced_data(
             "formality": request.config.formality,
             "lexicalComplexity": request.config.lexicalComplexity,
             "culturalSensitivity": request.config.culturalSensitivity,
+            "model": "gpt-4o-mini", 
+            "privacyLevel": request.config.privacyLevel, # not using
+            "biasControl": request.config.biasControl, # not using
+            "sentimentIntensity": request.config.sentimentIntensity, # not using
+            "diversity": request.config.diversity, # not using
+            "temporalRelevance": request.config.temporalRelevance, # not using
+            "noiseLevel": request.config.noiseLevel, # not using
             "temperature": request.config.temperature,
             "topP": request.config.topP,
-            "maxTokens": request.config.maxTokens,
+            "maxTokens": request.config.maxTokens, #Im hardcoding it anyways
             "frequencyPenalty": request.config.frequencyPenalty,
             "presencePenalty": request.config.presencePenalty,
             "strict": strict
@@ -533,14 +540,30 @@ async def cleanup_after_delay(request_id: str, pdf_path: str, delay: int = 600):
     """Cleanup cache and PDF file after delay"""
     await asyncio.sleep(delay)
     try:
-        # Get the analyzer instance if it exists
-        if request_id in analysis_status:
-            analyzer = SentimentAnalysisReport(data=[], request_id=request_id)  # Empty data as we're just cleaning up
-            analyzer.cleanup()
+        # Remove the file if it exists
+        if pdf_path and os.path.exists(pdf_path):
+            # Get the directory path
+            temp_dir = os.path.dirname(pdf_path)
+            
+            # Remove all files in the temp directory
+            if os.path.exists(temp_dir):
+                for file in os.listdir(temp_dir):
+                    file_path = os.path.join(temp_dir, file)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        logger.error(f"Error removing file {file_path}: {str(e)}")
+                
+                # Remove the directory itself
+                try:
+                    os.rmdir(temp_dir)
+                except Exception as e:
+                    logger.error(f"Error removing directory {temp_dir}: {str(e)}")
         
         # Clean up cache entries
         pdf_cache.pop(request_id, None)
         analysis_status.pop(request_id, None)
+        
     except Exception as e:
         logger.error(f"Error during cleanup for request {request_id}: {str(e)}")
 

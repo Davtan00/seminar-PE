@@ -54,21 +54,21 @@ class AdvancedConfig(BaseModel):
     )
     maxTokens: int = Field(
         ge=1, 
-        le=2000, 
+        le=8000, 
         default=100,
         description="Maximum tokens to generate"
     )
     frequencyPenalty: float = Field(
-        ge=0, 
-        le=2, 
+        ge=-2.0, 
+        le=2.0, 
         default=0,
-        description="Penalizes frequent token usage (0-2)"
+        description="Penalizes frequent token usage (-2.0 to 2.0)"
     )
     presencePenalty: float = Field(
-        ge=0, 
-        le=2, 
+        ge=-2.0, 
+        le=2.0, 
         default=0,
-        description="Penalizes token presence (0-2)"
+        description="Penalizes token presence (-2.0 to 2.0)"
     )
 
     # Content control parameters
