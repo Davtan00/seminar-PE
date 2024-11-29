@@ -179,7 +179,7 @@ class GenSenChain:
         )
         
         # Simplified system prompt
-        self.system_prompt = """Generate authentic reviews with specified sentiment.
+        self.system_prompt = """Generate synthetic reviews with specified sentiment, each must strictly follow the provided parameters.
 Return a JSON object with the following schema:
 {
   "reviews": [
@@ -239,7 +239,7 @@ Return a JSON object with the following schema:
                             ],
                             "response_format": {"type": "json_object"},
                             "temperature": 0.7,
-                            "max_tokens": 4000
+                            "max_tokens": 8000
                         },
                         timeout=self.base_timeout
                     ) as response:
