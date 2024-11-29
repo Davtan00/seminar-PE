@@ -7,62 +7,43 @@ logger = logging.getLogger(__name__)
 class ConcurrencyManager:
     def __init__(
         self,
-        initial: int = 400,
-        min_limit: int = 200,
-        max_limit: int = 600,
-        success_threshold: int = 3,
-        failure_threshold: int = 3
+        initial: int = 200,
+        min_limit: int = 100,
+        max_limit: int = 300,
+        increment: int = 10,
+        decrement: int = 20
     ):
         self.current_limit = initial
         self.min_limit = min_limit
         self.max_limit = max_limit
-        self.success_streak = 0
-        self.failure_streak = 0
+        self.increment = increment
+        self.decrement = decrement
         self._semaphore = asyncio.Semaphore(initial)
-        self._lock = asyncio.Lock()
-        self.success_threshold = success_threshold
-        self.failure_threshold = failure_threshold
-        self._adjustment_factor = 1.5  # More aggressive scaling
 
     async def acquire(self):
         """Acquire the semaphore"""
         await self._semaphore.acquire()
 
-    def release(self, success: bool = True):
-        """Release the semaphore and update stats"""
+    def release(self):
+        """Release the semaphore"""
         self._semaphore.release()
-        if success:
-            asyncio.create_task(self.handle_success())  # Create task for async handling, avoids blocking the main thread
-        else:
-            asyncio.create_task(self.handle_failure())  # Create task for async handling, avoids blocking the main thread
 
-    async def handle_success(self):
-        """Handle successful operations with more aggressive scaling"""
-        async with self._lock:
-            self.success_streak += 1
-            self.failure_streak = 0
-            if self.success_streak >= self.success_threshold:
-                increase = int(30 * self._adjustment_factor)  # More aggressive increase
-                self.current_limit = min(self.current_limit + increase, self.max_limit)
-                self._update_semaphore()
-                self.success_streak = 0
-                logger.debug(f"Increased concurrency limit to {self.current_limit}")
+    def increase_limit(self):
+        """Increase concurrency limit after successful operations"""
+        if self.current_limit < self.max_limit:
+            self.current_limit = min(self.max_limit, self.current_limit + self.increment)
+            self._update_semaphore()
 
-    async def handle_failure(self):
-        """Handle failed operations with gentler reduction"""
-        async with self._lock:
-            self.failure_streak += 1
-            self.success_streak = 0
-            if self.failure_streak >= self.failure_threshold:
-                decrease = int(20 * self._adjustment_factor)  # Smaller decrease
-                self.current_limit = max(self.current_limit - decrease, self.min_limit)
-                self._update_semaphore()
-                self.failure_streak = 0
-                logger.debug(f"Decreased concurrency limit to {self.current_limit}")
+    def decrease_limit(self):
+        """Decrease concurrency limit after failures or rate limits"""
+        if self.current_limit > self.min_limit:
+            self.current_limit = max(self.min_limit, self.current_limit - self.decrement)
+            self._update_semaphore()
 
     def _update_semaphore(self):
         """Update the semaphore with the new limit"""
-        self._semaphore = asyncio.Semaphore(self.current_limit)
+        new_semaphore = asyncio.Semaphore(self.current_limit)
+        self._semaphore = new_semaphore
 
     async def __aenter__(self):
         """Context manager support"""
@@ -71,5 +52,8 @@ class ConcurrencyManager:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager support"""
-        success = exc_type is None and exc_val is None
-        self.release(success=success)
+        self.release()
+        if exc_type is None:
+            self.increase_limit()
+        elif "429" in str(exc_val):  # Rate limit error
+            self.decrease_limit()

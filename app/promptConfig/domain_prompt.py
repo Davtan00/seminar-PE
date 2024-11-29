@@ -57,10 +57,10 @@ def create_review_prompt_detailed(
     """Create prompt with option for compact or detailed version"""
     
     if use_compact_prompt:
-        return f"""Generate {batch_params['count']} {batch_params['sentiment']} {domain} reviews.
+        return f"""Generate {batch_params['count']} reviews with a {batch_params['sentiment']} sentiment for the {batch_params['domain']} domain.
 Parameters: {parameters.get_prompt_description(use_compact=True)}
 Format: JSON with text and sentiment fields."""
-    
+
     # Original detailed prompt
     domain_config = DOMAIN_CONFIGS.get(domain, {})
     current_sentiment = batch_params['sentiment']
