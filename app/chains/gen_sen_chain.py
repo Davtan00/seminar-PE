@@ -3,7 +3,7 @@ import aiohttp
 import json
 import logging
 import asyncio
-from typing import List, Dict, Any, Optional,Tuple
+from typing import List, Dict, Any, Optional,Tuple,Iterator 
 import time
 from dataclasses import dataclass
 from math import ceil
@@ -12,6 +12,7 @@ from app.classes.models import ReviewParameters
 from app.promptConfig.domain_prompt import create_review_prompt_detailed
 from app.classes.concurrencyManager import ConcurrencyManager
 import tiktoken
+from itertools import islice
 
 
 
@@ -69,29 +70,32 @@ class BatchOptimizer:
         def get_tokens_per_batch(batch_size: int) -> int:
             return self.token_estimates.get_total_tokens_for_batch(batch_size)
 
-        is_small_job = self.total_reviews <= 50000
-        
+        # Adjust based on job size
+        if self.total_reviews > 5000:
+            min_batch_size = 15
+            max_concurrent_cap = 600
+            safety_factor = 0.90
+        elif self.total_reviews > 1000:
+            min_batch_size = 10
+            max_concurrent_cap = 400
+            safety_factor = 0.95
+        else:
+            min_batch_size = 8
+            max_concurrent_cap = 250
+            safety_factor = 0.98
+
         # Calculate theoretical maximums
         theoretical_max_reviews = min(
-            25,  # Reduced from 100 to 15
-            (max_tokens_per_request - self.token_estimates.base_prompt_tokens - self.token_estimates.json_overhead) // self.token_estimates.tokens_per_review
+            35,  # Increased from 25
+            (max_tokens_per_request - self.token_estimates.base_prompt_tokens - self.token_estimates.json_overhead) 
+            // self.token_estimates.tokens_per_review
         )
-        
-        theoretical_max_by_tokens = (max_tokens_per_request - self.token_estimates.base_prompt_tokens - self.token_estimates.json_overhead) // self.token_estimates.tokens_per_review
-        
-        min_batch_size = 10 if is_small_job else 5  # Reduced from 50/25
-        max_concurrent_cap = 800 if is_small_job else 400  # Increased from 400/200
-        safety_factor = 0.98 if is_small_job else 0.95
         
         max_batch_size = min(
-            25,  
-            theoretical_max_reviews,
-            theoretical_max_by_tokens
+            35,  # Increased from 25
+            theoretical_max_reviews
         )
 
-        # Test batch sizes from 15 to max_batch_size for small jobs
-        # This ensures we don't waste time testing very small batch sizes
-        min_batch_size = 15 if is_small_job else 5
         optimal_config = None
         max_throughput = 0
 
@@ -111,15 +115,10 @@ class BatchOptimizer:
             )
             concurrent_tasks = max(1, int(concurrent_tasks * safety_factor))
             
-            # Calculate throughput (reviews per second)
             throughput = concurrent_tasks * batch_size
-            
-            # More aggressive completion time for small jobs
             completion_time = self.total_reviews / (throughput * 60)
-            max_completion_time = 15 if is_small_job else 120  # 15 mins for small jobs
             
             if (throughput > max_throughput and 
-                completion_time < max_completion_time and 
                 tokens_per_batch < max_tokens_per_request):
                 max_throughput = throughput
                 optimal_config = {
@@ -128,13 +127,9 @@ class BatchOptimizer:
                     'tokens_per_batch': tokens_per_batch,
                     'reviews_per_second': throughput,
                     'estimated_completion_time': completion_time,
-                    'total_batches': ceil(self.total_reviews / batch_size),
-                    'estimated_total_tokens': (
-                        ceil(self.total_reviews / batch_size) * tokens_per_batch
-                    )
+                    'total_batches': ceil(self.total_reviews / batch_size)
                 }
 
-        logger.info(f"Calculated optimal configuration: {optimal_config}")
         return optimal_config
 
     # ## TOO MUCH UNNECESSARY INFORMATION FOR PROMPT
@@ -165,11 +160,18 @@ class GenSenChain:
         # Keep token estimates but make optional
         self.token_estimates = TokenEstimates()
         
-        # Simplified concurrency settings
-        self.request_semaphore = asyncio.Semaphore(1000)  # Increased from 500
+        # Replace semaphore with ConcurrencyManager and enforces limits
+        self.concurrency_manager = ConcurrencyManager(
+            initial=300,          # Start aggressive
+            min_limit=100,        # Don't go below this
+            max_limit=400,        # Don't go above this
+            success_threshold=5,  # Increase limit after 5 successes
+            failure_threshold=2   # Decrease limit after 2 failures
+        )
+    
         self.base_timeout = aiohttp.ClientTimeout(
-            total=300,
-            connect=10,   # Reduced from 30
+        total=300,
+        connect=10,   # Reduced from 30
             sock_read=30  # Reduced from 90
         )
         
@@ -202,11 +204,9 @@ Return a JSON object with the following schema:
         self,
         session: aiohttp.ClientSession,
         batch_params: Dict[str, Any],
-        retries: int = 3
+        retries: int = 4
     ) -> Tuple[List[Dict[str, Any]], float]:
         start_time = time.perf_counter()
-        
-        # Precompute the request payload
         payload = {
             "model": batch_params.get("model", "gpt-4o-mini"),
             "messages": [
@@ -223,7 +223,7 @@ Return a JSON object with the following schema:
             ],
             "response_format": {"type": "json_object"},
             "temperature": batch_params.get("temperature", 0.7),
-            "max_tokens": 4000,
+            "max_tokens": 8000,
             "top_p": batch_params.get("topP", 1.0),
         }
         
@@ -234,14 +234,21 @@ Return a JSON object with the following schema:
         
         for attempt in range(retries):
             try:
-                async with self.request_semaphore:
-                    await self.rate_limiter.wait_if_needed()
+                async with self.concurrency_manager:
+                    timeout = aiohttp.ClientTimeout(
+                        total=90,  # Increased from 60
+                        connect=10 + (attempt * 3),  # Less aggressive scaling
+                        sock_read=30 + (attempt * 3)  # Less aggressive scaling
+                    )
                     
                     async with session.post(
                         "https://api.openai.com/v1/chat/completions",
-                        headers=headers,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json"
+                        },
                         json=payload,
-                        timeout=self.base_timeout
+                        timeout=timeout
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -253,20 +260,50 @@ Return a JSON object with the following schema:
                             time.perf_counter() - start_time)
                         
                         if response.status == 429:  # Rate limit
-                            await asyncio.sleep(0.5 * (attempt + 1))  # Reduced backoff
+                            await asyncio.sleep(0.3 * (attempt + 1))  # Reduced backoff
                             continue
                             
                         if response.status >= 500:  # Server error
-                            await asyncio.sleep(0.5 * (attempt + 1))  # Reduced backoff
+                            await asyncio.sleep(0.3 * (attempt + 1))  # Reduced backoff
                             continue
                         
                         raise aiohttp.ClientError(f"API error: {await response.text()}")
-                        
             except Exception as e:
                 if attempt == retries - 1:
                     logger.error(f"Batch processing error after {retries} attempts: {str(e)}")
                     return [], time.perf_counter() - start_time
-                await asyncio.sleep(min(2 ** attempt, 8))
+                await asyncio.sleep(min(1.5 ** attempt, 4))  # Less aggressive backoff
+        return [], time.perf_counter() - start_time
+
+    def _create_batch_tasks(
+        self,
+        session: aiohttp.ClientSession,
+        sentiment: str,
+        remaining: int,
+        max_concurrent: int,
+        batch_size: int,
+        domain: str,
+        config: Dict[str, Any]
+    ) -> List[Tuple[str, asyncio.Task]]:
+        tasks = []
+        batches_needed = (remaining + batch_size - 1) // batch_size
+        concurrent_batches = min(batches_needed, max_concurrent)
+        
+        for i in range(concurrent_batches):
+            current_size = min(batch_size, remaining - (i * batch_size))
+            if current_size <= 0:
+                break
+            
+            batch_params = {
+                "count": current_size,
+                "sentiment": sentiment,
+                "domain": domain,
+                **config
+            }
+            task = asyncio.create_task(self.process_batch(session, batch_params))
+            tasks.append((sentiment, task))
+        
+        return tasks
 
     async def batch_generate(
         self,
@@ -311,6 +348,11 @@ Return a JSON object with the following schema:
                 # Initialize stats dictionary for each sentiment
                 stats = {sentiment: BatchStats() for sentiment in distribution.keys()}
                 
+                # Initialize temporary storage for reviews
+                temp_reviews: List[Dict[str, Any]] = []
+                total_reviews = sum(distribution.values())
+                chunk_size = 1000 if total_reviews > 5000 else 2500
+                
                 # Create initial tasks
                 for sentiment, count in distribution.items():
                     batches_needed = (count + BATCH_SIZE - 1) // BATCH_SIZE
@@ -331,8 +373,36 @@ Return a JSON object with the following schema:
                         task = asyncio.create_task(self.process_batch(session, batch_params))
                         pending_tasks.append((sentiment, task))
                 
+                last_progress_time = time.time()
+                last_review_count = 0
+                
                 # Process tasks until all reviews are generated
                 while pending_tasks:
+                    # Log active tasks status every 30 seconds
+                    current_time = time.time()
+                    if current_time - last_progress_time > 30:
+                        current_review_count = len(all_reviews)
+                        reviews_since_last = current_review_count - last_review_count
+                        
+                        logger.info(
+                            f"Status Update [{time.strftime('%H:%M:%S')}]:\n"
+                            f"• Active Tasks: {len(pending_tasks)}\n"
+                            f"• Reviews in last 30s: {reviews_since_last}\n"
+                            f"• Total Reviews: {current_review_count}\n"
+                            f"• Tasks Status:\n" +
+                            "\n".join([
+                                f"  - {sent}: {remaining_distribution[sent]} remaining"
+                                for sent in distribution.keys()
+                            ])
+                        )
+                        
+                        # If no progress in 30 seconds, might be stuck
+                        if reviews_since_last == 0:
+                            logger.warning("⚠️ No progress in last 30 seconds - might be stuck!")
+                        
+                        last_progress_time = current_time
+                        last_review_count = current_review_count
+
                     done, _ = await asyncio.wait(
                         [task for _, task in pending_tasks],
                         return_when=asyncio.FIRST_COMPLETED
@@ -352,10 +422,36 @@ Return a JSON object with the following schema:
                                 reviews_to_add = reviews[:remaining_needed]
                                 sentiment_counts[sentiment] += len(reviews_to_add)
                                 remaining_distribution[sentiment] -= len(reviews_to_add)
-                                all_reviews.extend(reviews_to_add)
+                                
+                                # Process reviews in memory-efficient way
+                                temp_reviews.extend(reviews_to_add)
+                                
+                                # When we hit chunk size, process and clear temporary storage
+                                if len(temp_reviews) >= chunk_size:
+                                    # Process chunk
+                                    for i, review in enumerate(temp_reviews):
+                                        review["id"] = sentiment_counts["positive"] + sentiment_counts["negative"] + sentiment_counts["neutral"] + i + 1
+                                    
+                                    # Extend all_reviews with processed chunk
+                                    all_reviews.extend(temp_reviews)
+                                    # Clear temporary storage
+                                    temp_reviews = []
+                                    
+                                    # Force garbage collection after processing large chunks
+                                    if len(all_reviews) % (chunk_size * 5) == 0:
+                                        import gc
+                                        gc.collect()
                                 
                                 # Update stats for this sentiment
                                 stats[sentiment].update(processing_time, len(reviews), len(reviews_to_add))
+
+                            # If we have all the reviews we need
+                            if all(count <= 0 for count in remaining_distribution.values()):
+                                # Cancel all remaining tasks
+                                for _, task in pending_tasks:
+                                    task.cancel()
+                                pending_tasks.clear()
+                                break
                         except Exception as e:
                             logger.error(f"Error processing batch: {str(e)}")
                             # Recalculate exactly how many reviews we still need
@@ -388,7 +484,7 @@ Return a JSON object with the following schema:
                             pending_tasks.append((sentiment, new_task))
                         
                         # Log progress
-                        LOG_FREQUENCY = 500  # Increased from 250
+                        LOG_FREQUENCY = 750  # Increased from 250
                         if len(all_reviews) % LOG_FREQUENCY == 0:
                             logger.info(f"\nGeneration progress ({len(all_reviews)} reviews):")
                             for sent, stat in stats.items():
@@ -400,16 +496,20 @@ Return a JSON object with the following schema:
                                         f"\n - Avg time/batch: {stat.avg_time_per_batch:.2f}s"
                                     )
 
-                # Add IDs to reviews
-                for i, review in enumerate(all_reviews):
-                    review["id"] = i + 1
+                # Process any remaining reviews in temp storage
+                if temp_reviews:
+                    start_id = len(all_reviews) + 1
+                    for i, review in enumerate(temp_reviews):
+                        review["id"] = start_id + i
+                    all_reviews.extend(temp_reviews)
                 
-                # Calculate final distribution
-                final_distribution = {
-                    "positive": sum(1 for r in all_reviews if r.get("sentiment") == "positive"),
-                    "negative": sum(1 for r in all_reviews if r.get("sentiment") == "negative"),
-                    "neutral": sum(1 for r in all_reviews if r.get("sentiment") == "neutral")
-                }
+                # Calculate final distribution using chunks for memory efficiency
+                final_distribution = {sentiment: 0 for sentiment in distribution.keys()}
+                for chunk in chunk_reviews(all_reviews, chunk_size):
+                    for review in chunk:
+                        sentiment = review.get("sentiment")
+                        if sentiment in final_distribution:
+                            final_distribution[sentiment] += 1
                 
                 # Log distribution mismatches
                 for sentiment, target in distribution.items():
@@ -424,7 +524,9 @@ Return a JSON object with the following schema:
                     "data": all_reviews,
                     "summary": {
                         "total": len(all_reviews),
-                        "distribution": final_distribution
+                        "distribution": final_distribution,
+                        "memory_efficient": True,
+                        "chunk_size_used": chunk_size
                     }
                 }
                 
@@ -474,3 +576,8 @@ class BatchStats:
     @property
     def avg_time_per_batch(self) -> float:
         return self.total_time / self.batches_completed if self.batches_completed > 0 else 0
+
+def chunk_reviews(reviews: List[Dict[str, Any]], chunk_size: int = 1000) -> Iterator[List[Dict[str, Any]]]:
+    """Process reviews in chunks to manage memory for large requests."""
+    iterator = iter(reviews)
+    return iter(lambda: list(islice(iterator, chunk_size)), [])
